@@ -1,0 +1,40 @@
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables (contains API keys, paths to client data)
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Logs (may contain transaction data)
+*.log
+bridge.log
+
+# Temp files from Paradox reader
+pointex_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Exported data files (may contain client sales/product data)
+*.csv
+*.xlsx
+*.xls
+
+# Distribution
+dist/
+build/
+*.egg-info/
