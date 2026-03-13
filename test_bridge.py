@@ -149,6 +149,22 @@ def safe_copy_single(table_name: str, saveurs_path: str) -> tuple[str | None, st
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return None, f"{table_name}.DB not found in {saveurs_path}"
 
+    # Verify copied .DB file is not empty (can happen with locked files)
+    copied_db = os.path.join(tmp_dir, f"{table_name}.DB")
+    copied_size = os.path.getsize(copied_db)
+    src_db = os.path.join(saveurs_path, f"{table_name}.DB")
+    src_size = os.path.getsize(src_db)
+
+    if copied_size == 0 and src_size > 0:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, (
+            f"{table_name}.DB copied as 0 bytes (source is {src_size} bytes). "
+            f"The file is likely locked by the POS. Try when POS is not running."
+        )
+
+    if copied_size != src_size:
+        errors.append(f".DB size mismatch: source={src_size} copied={copied_size}")
+
     return tmp_dir, None
 
 
@@ -474,26 +490,53 @@ def test_read_tables(tables: list[str], saveurs_path: str) -> dict[str, list[dic
         try:
             db_path = os.path.join(tmp_dir, f"{name}.DB")
 
-            # Log file size for debugging
+            # Log file sizes for debugging
             file_size = os.path.getsize(db_path)
+            src_size = os.path.getsize(os.path.join(saveurs_path, f"{name}.DB"))
+            size_info = f"({file_size/1024:.1f} KB"
+            if file_size != src_size:
+                size_info += f", source={src_size/1024:.1f} KB"
+            size_info += ")"
 
             rows = read_table(db_path)
             results[name] = rows
             cols = list(rows[0].keys()) if rows else []
 
             if rows:
-                cprint(GREEN, f"  {name:30s}  {len(rows):6d} rows  {len(cols):3d} columns  ({file_size/1024:.1f} KB)")
+                cprint(GREEN, f"  {name:30s}  {len(rows):6d} rows  {len(cols):3d} columns  {size_info}")
             else:
-                cprint(YELLOW, f"  {name:30s}  0 rows (empty table, {file_size/1024:.1f} KB)")
-                # Check if .PX file was present
+                cprint(YELLOW, f"  {name:30s}  0 rows (empty table) {size_info}")
                 px_exists = os.path.exists(os.path.join(tmp_dir, f"{name}.PX"))
                 if not px_exists and file_size > 2048:
                     cprint(YELLOW, f"    Warning: No .PX index file — this may be why 0 rows were read")
-                    cprint(YELLOW, f"    Check if {name}.PX exists in SAVEURS folder")
         except Exception as e:
-            cprint(RED, f"  {name:30s}  READ FAILED")
-            print_error(f"reading {name}.DB", e)
-            errors[name] = str(e)
+            cprint(RED, f"  {name:30s}  READ FAILED (from copy)")
+            print_error(f"reading {name}.DB (copied)", e)
+
+            # Fallback: try reading directly from the network share
+            direct_path = os.path.join(saveurs_path, f"{name}.DB")
+            try:
+                cprint(YELLOW, f"    Trying direct read from network share...")
+                direct_size = os.path.getsize(direct_path)
+                rows = read_table(direct_path)
+                results[name] = rows
+                cols = list(rows[0].keys()) if rows else []
+                if rows:
+                    cprint(GREEN, f"    DIRECT READ OK: {len(rows)} rows, {len(cols)} columns ({direct_size/1024:.1f} KB)")
+                else:
+                    cprint(YELLOW, f"    Direct read returned 0 rows ({direct_size/1024:.1f} KB)")
+
+                    # Hex dump first 128 bytes for debugging
+                    with open(direct_path, "rb") as hf:
+                        header = hf.read(128)
+                    cprint(DIM, f"    Header hex dump (first 128 bytes):")
+                    for row_off in range(0, len(header), 16):
+                        hex_part = " ".join(f"{b:02x}" for b in header[row_off:row_off+16])
+                        cprint(DIM, f"      {row_off:04x}: {hex_part}")
+            except Exception as e2:
+                cprint(RED, f"    Direct read also FAILED")
+                print_error(f"direct reading {name}.DB", e2)
+                errors[name] = f"Copy failed: {e} | Direct failed: {e2}"
         finally:
             cleanup(tmp_dir)
 
