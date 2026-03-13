@@ -181,6 +181,9 @@ def cleanup(tmp_dir: str):
 
 def export_rows(rows: list[dict], filename: str):
     """Export rows to CSV, JSON-lines TXT, or XLSX."""
+    # If filename has no directory, write next to the script
+    if not os.path.dirname(filename):
+        filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
     ext = Path(filename).suffix.lower()
 
     if not rows:
@@ -566,7 +569,7 @@ def test_read_tables(tables: list[str], saveurs_path: str) -> dict[str, list[dic
 # Test 4: Key tables for ProtoCart
 # ---------------------------------------------------------------------------
 
-KEY_TABLES = ["ARTICLES", "VENTE_REGLEE", "ARTICLE_VENDU"]
+KEY_TABLES = ["ARTICLES", "NOTE_ENTETE", "NOTE_DETAIL"]
 
 
 def test_key_tables(cached: dict[str, list[dict]]):
@@ -597,11 +600,11 @@ def test_key_tables(cached: dict[str, list[dict]]):
         if table == "ARTICLES":
             expected = ["ART_ID", "ART_ARTICLE", "ART_BARCODE"]
             _check_expected_cols(cols, expected, table)
-        elif table == "VENTE_REGLEE":
-            expected = ["VTE_ID", "VTE_MONTANT"]
+        elif table == "NOTE_ENTETE":
+            expected = ["VTE_ID", "VTE_TOTAL_TTC", "VTE_DATE_DE_LA"]
             _check_expected_cols(cols, expected, table)
-        elif table == "ARTICLE_VENDU":
-            expected = ["VTE_ID", "ART_ID", "VTE_QUANTITE", "VTE_PVHT"]
+        elif table == "NOTE_DETAIL":
+            expected = ["VTE_ID", "ART_ID", "VTE_QUANTITE", "VTE_PRIX_DE_V"]
             _check_expected_cols(cols, expected, table)
 
         # Show first 3 rows as sample
@@ -622,6 +625,8 @@ def test_key_tables(cached: dict[str, list[dict]]):
     print()
     if all_ok:
         cprint(GREEN, "  All 3 key tables OK — bridge should work!")
+        cprint(DIM, "  NOTE: NOTE_ENTETE/NOTE_DETAIL hold ACTIVE receipts.")
+        cprint(DIM, "  After daily closing (cloture), data moves to VENTE_REGLEE/ARTICLE_VENDU.")
     else:
         cprint(RED, "  Some key tables are missing or empty — bridge will NOT work correctly.")
         cprint(YELLOW, "  Share the test_report.log file for debugging.")
@@ -934,8 +939,9 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                         print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:10.2f} {s['transactionCount']:6d}")
                 else:
                     cprint(YELLOW, "  No sales found for this period.")
-                    cprint(YELLOW, "  Check: Are there transactions in VENTE_REGLEE for this date?")
-                    cprint(YELLOW, "  Try: read VENTE_REGLEE   then look at the date column values")
+                    cprint(YELLOW, "  Check: Are there receipts in NOTE_ENTETE for this date?")
+                    cprint(YELLOW, "  Try: read NOTE_ENTETE   then look at VTE_DATE_DE_LA_PIECE values")
+                    cprint(YELLOW, "  Tip: After daily closing, data is purged. Try 'sales today'.")
 
             # ---- export ----
             elif cmd == "export" and len(parts) >= 3:
