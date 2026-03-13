@@ -83,13 +83,15 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
         entete_totals = {}  # VTE_ID -> total TTC
 
         for row in entetes:
-            # Skip cancelled receipts
-            nb_annule = row.get("VTE_NB_ANNULE") or row.get("VTE_NB_ANNUL") or 0
-            try:
-                if int(float(nb_annule)) != 0:
-                    continue
-            except (ValueError, TypeError):
-                pass
+            # Note: VTE_NB_ANNULE = number of voided LINES, not "receipt cancelled"
+            # VTE_CACHE = 1 means the entire receipt is hidden/voided
+            vte_cache = row.get("VTE_CACHE")
+            if vte_cache is not None:
+                try:
+                    if int(float(vte_cache)) != 0:
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             rec_date = row.get(date_col) if date_col else None
             if is_in_period(rec_date, from_dt, to_dt):
