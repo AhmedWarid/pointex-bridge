@@ -651,7 +651,7 @@ def test_api_smoke():
     separator("=")
 
     checks = [
-        ("app.main", "app (FastAPI instance)"),
+        ("app.main", "app"),
         ("app.routers.health", "router"),
         ("app.routers.sales", "router"),
         ("app.routers.articles", "router"),
