@@ -96,40 +96,45 @@ def print_error(context: str, exc: Exception):
 # File helpers
 # ---------------------------------------------------------------------------
 
-def _get_paradox_extensions():
-    """Import from app or define fallback."""
-    try:
-        from app.services.file_manager import PARADOX_EXTENSIONS
-        return PARADOX_EXTENSIONS
-    except Exception as e:
-        print_error("importing PARADOX_EXTENSIONS", e)
-        return [".DB", ".PX", ".XG0", ".YG0", ".MB", ".VAL"]
-
-PARADOX_EXTENSIONS = _get_paradox_extensions()
+def _noop():
+    pass
 
 
 def safe_copy_single(table_name: str, saveurs_path: str) -> tuple[str | None, str | None]:
     """
-    Copy one table + companions to temp dir.
+    Copy one Paradox table + ALL companion files to temp dir.
+    Finds all files matching the table name prefix (e.g. ARTICLES.DB,
+    ARTICLES.PX, ARTICLES.MB, ARTICLES.XG0, ARTICLES.XG1, etc.)
     Returns (temp_dir_path, error_message). One will be None.
     """
     tmp_dir = tempfile.mkdtemp(prefix="pointex_test_")
-    found_db = False
+
+    # Find ALL companion files by prefix
+    prefix = table_name.upper() + "."
+    try:
+        all_files = [f for f in os.listdir(saveurs_path) if f.upper().startswith(prefix)]
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, f"Cannot list directory {saveurs_path}: {e}"
+
+    if not all_files:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, f"No files found for {table_name} in {saveurs_path}"
+
+    found_db = any(f.upper().endswith(".DB") for f in all_files)
+    if not found_db:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, f"{table_name}.DB not found in {saveurs_path}"
+
     copied_files = []
     errors = []
-
-    for ext in PARADOX_EXTENSIONS:
-        src = os.path.join(saveurs_path, f"{table_name}{ext}")
-        if not os.path.exists(src):
-            continue
-        if ext == ".DB":
-            found_db = True
-
+    for fname in all_files:
+        src = os.path.join(saveurs_path, fname)
         last_err = None
         for attempt in range(3):
             try:
-                shutil.copy2(src, tmp_dir)
-                copied_files.append(ext)
+                shutil.copy2(src, os.path.join(tmp_dir, fname))
+                copied_files.append(fname)
                 break
             except PermissionError as e:
                 last_err = e
@@ -139,21 +144,26 @@ def safe_copy_single(table_name: str, saveurs_path: str) -> tuple[str | None, st
                 last_err = e
                 break
 
-        if last_err and ext == ".DB":
+        if last_err and fname.upper().endswith(".DB"):
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            return None, f"Failed to copy {table_name}{ext}: {type(last_err).__name__}: {last_err}"
+            return None, f"Failed to copy {fname}: {type(last_err).__name__}: {last_err}"
         elif last_err:
-            errors.append(f"{ext}: {type(last_err).__name__}: {last_err}")
+            errors.append(f"{fname}: {type(last_err).__name__}: {last_err}")
 
-    if not found_db:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None, f"{table_name}.DB not found in {saveurs_path}"
-
-    # Verify copied .DB file is not empty (can happen with locked files)
+    # Verify copied .DB file is not empty
     copied_db = os.path.join(tmp_dir, f"{table_name}.DB")
+    if not os.path.exists(copied_db):
+        # Try case-insensitive match
+        for f in os.listdir(tmp_dir):
+            if f.upper() == f"{table_name}.DB".upper():
+                copied_db = os.path.join(tmp_dir, f)
+                break
+
     copied_size = os.path.getsize(copied_db)
     src_db = os.path.join(saveurs_path, f"{table_name}.DB")
     src_size = os.path.getsize(src_db)
+
+    cprint(DIM, f"    Copied {len(copied_files)} files: {', '.join(copied_files)}")
 
     if copied_size == 0 and src_size > 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -161,9 +171,6 @@ def safe_copy_single(table_name: str, saveurs_path: str) -> tuple[str | None, st
             f"{table_name}.DB copied as 0 bytes (source is {src_size} bytes). "
             f"The file is likely locked by the POS. Try when POS is not running."
         )
-
-    if copied_size != src_size:
-        errors.append(f".DB size mismatch: source={src_size} copied={copied_size}")
 
     return tmp_dir, None
 
