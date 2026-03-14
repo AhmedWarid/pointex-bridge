@@ -249,7 +249,8 @@ def get_journal_sales(
         else:
             journal_end = datetime(yyyy, mm + 1, 1)
 
-        if journal_start <= to_dt and journal_end >= from_dt:
+        # Compare dates only (avoid naive vs aware datetime mismatch)
+        if journal_start.date() <= to_dt.date() and journal_end.date() >= from_dt.date():
             relevant[fname] = text
 
     logger.info(

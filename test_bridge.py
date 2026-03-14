@@ -752,6 +752,7 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
     {CYAN}sales today{RESET}              Sales for today (04:00 -> 23:59)
     {CYAN}fc2 <path> <from> <to>{RESET}  Read sales from FC2 file (dates as YYYY-MM-DD)
     {CYAN}fc2 <path> list{RESET}         List journals in FC2 file
+    {CYAN}fc2 latest <dir>{RESET}        Auto-find latest FC2, show last day's sales
     {CYAN}export <TABLE> <file>{RESET}    Export to .csv / .txt / .xlsx
     {CYAN}exportq <file>{RESET}           Export last query result
     {CYAN}quit{RESET}                     Exit
@@ -953,6 +954,69 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     list_fc2_files,
                 )
                 from app.services.sales_service import _aggregate_journal_lines
+
+                # ---- fc2 latest <dir> ----
+                if parts[1].lower() == "latest":
+                    fc2_dir = parts[2] if len(parts) >= 3 else saveurs_path.rsplit("\\", 1)[0] if "\\" in saveurs_path else saveurs_path.rsplit("/", 1)[0]
+                    cprint(DIM, f"  Scanning for FC2 files in: {fc2_dir}")
+                    fc2_files = list_fc2_files(fc2_dir)
+
+                    if not fc2_files:
+                        cprint(RED, f"  No .FC2 files found in {fc2_dir}")
+                        continue
+
+                    fc2_path = fc2_files[0]
+                    size_mb = os.path.getsize(fc2_path) / 1024 / 1024
+                    mtime = datetime.fromtimestamp(os.path.getmtime(fc2_path))
+                    cprint(GREEN, f"  Latest FC2: {os.path.basename(fc2_path)} ({size_mb:.1f} MB, modified {mtime.strftime('%Y-%m-%d %H:%M')})")
+
+                    # Extract all JV journals and find the last day with data
+                    cprint(DIM, f"  Extracting journals...")
+                    journals = extract_journals(fc2_path, "JV")
+                    if not journals:
+                        cprint(RED, "  No sales journals found in this FC2 file.")
+                        continue
+
+                    # Find the latest journal and parse it to get the last date
+                    latest_journal_name = sorted(journals.keys())[-1]
+                    latest_lines = parse_journal_lines(journals[latest_journal_name])
+
+                    if not latest_lines:
+                        cprint(RED, f"  Latest journal {latest_journal_name} has no article lines.")
+                        continue
+
+                    # Find the very last date across all lines
+                    last_date = max(l["date"].date() for l in latest_lines)
+                    cprint(GREEN, f"  Last day with sales data: {last_date}")
+
+                    # Query that day
+                    from_dt = datetime(last_date.year, last_date.month, last_date.day, 0, 0, 0)
+                    to_dt = datetime(last_date.year, last_date.month, last_date.day, 23, 59, 59)
+
+                    sale_lines = get_journal_sales(fc2_path, from_dt, to_dt)
+                    result = _aggregate_journal_lines(sale_lines)
+                    sales_data = result["sales"]
+                    last_result = sales_data
+
+                    print()
+                    cprint(BOLD, f"  Sales for {last_date} ({len(sales_data)} articles)")
+                    separator()
+                    print(f"  Total transactions: {result['totalTransactions']}")
+                    print(f"  Total revenue:      {result['totalRevenue']:,.2f} DH")
+                    print()
+
+                    if sales_data:
+                        print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'Price':>8s} {'Txns':>6s}  {'Category'}")
+                        separator()
+                        for s in sorted(sales_data, key=lambda x: x["totalRevenue"], reverse=True)[:30]:
+                            name = (s["articleName"] or "?")[:30]
+                            cat = (s.get("classification") or "")[:20]
+                            print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:8.2f} {s['transactionCount']:6d}  {cat}")
+                        if len(sales_data) > 30:
+                            print(f"  ... and {len(sales_data) - 30} more articles")
+                    else:
+                        cprint(YELLOW, "  No sales found.")
+                    continue
 
                 fc2_path = parts[1]
 
