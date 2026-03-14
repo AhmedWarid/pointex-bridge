@@ -1,8 +1,24 @@
+"""
+Sales service — combines live Paradox data with FC2 journal history.
+
+Data sources:
+  1. NOTE_ENTETE + NOTE_DETAIL (Paradox): Today's active/open receipts
+  2. FC2 journal files (JV*.TXT):        Historical closed sales
+
+The bridge tries FC2 first for historical data, and falls back to
+live Paradox tables for today's active receipts.
+"""
+
 import logging
 import os
 from collections import defaultdict
 from datetime import datetime
 
+from app.config import settings
+from app.services.fc2_reader import (
+    get_journal_sales,
+    list_fc2_files,
+)
 from app.services.file_manager import cleanup_temp, safe_copy_tables
 from app.services.paradox_reader import read_table
 from app.utils.date_utils import is_in_period
@@ -54,37 +70,131 @@ def _normalize_vte_id(val) -> int | None:
         return None
 
 
-def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
+# ── FC2 journal-based sales ──────────────────────────────────────────────
+
+
+def _aggregate_journal_lines(lines: list[dict]) -> dict:
     """
-    Read Paradox tables, filter sales by date, aggregate by article.
-    Returns dict matching the ProtoCart SalesResponse schema.
+    Aggregate flat journal sale lines into the ProtoCart response format.
+    Each line has: article_code, article_name, quantity, unit_price,
+    discount_pct, receipt_id, classification, etc.
+    """
+    agg = defaultdict(
+        lambda: {
+            "quantitySold": 0.0,
+            "totalRevenue": 0.0,
+            "unitPrice": 0.0,
+            "transactions": set(),
+            "articleName": "",
+            "classification": "",
+        }
+    )
+
+    for line in lines:
+        code = line["article_code"]
+        if not code:
+            continue
+
+        qty = line["quantity"]
+        price = line["unit_price"]
+        discount = line["discount_pct"]
+        effective_price = price * (1 - discount / 100) if discount else price
+
+        agg[code]["quantitySold"] += qty
+        agg[code]["totalRevenue"] += effective_price * qty
+        agg[code]["unitPrice"] = price
+        agg[code]["articleName"] = line["article_name"]
+        agg[code]["classification"] = line["classification"]
+        # receipt_id resets daily, so use date+receipt as unique key
+        txn_key = f"{line['date'].date()}_{line['receipt_id']}"
+        agg[code]["transactions"].add(txn_key)
+
+    sales = []
+    total_revenue = 0.0
+    all_transactions = set()
+
+    for art_code, data in agg.items():
+        revenue = round(data["totalRevenue"], 2)
+        total_revenue += revenue
+        all_transactions.update(data["transactions"])
+
+        sales.append({
+            "posArticleId": str(art_code),
+            "barcode": None,
+            "articleName": data["articleName"],
+            "quantitySold": round(data["quantitySold"], 3),
+            "weightSoldKg": None,
+            "totalRevenue": revenue,
+            "unitPrice": round(data["unitPrice"], 2),
+            "transactionCount": len(data["transactions"]),
+            "classification": data["classification"] or None,
+        })
+
+    return {
+        "sales": sales,
+        "totalRevenue": round(total_revenue, 2),
+        "totalTransactions": len(all_transactions),
+    }
+
+
+def _get_fc2_sales(from_dt: datetime, to_dt: datetime) -> dict | None:
+    """
+    Try to get sales from the most recent FC2 file.
+    Returns aggregated result dict or None if no FC2 files found.
+    """
+    fc2_dir = settings.fc2_dir
+    fc2_files = list_fc2_files(fc2_dir)
+
+    if not fc2_files:
+        logger.info("No FC2 files found in %s", fc2_dir)
+        return None
+
+    # Use the most recent FC2 file
+    fc2_path = fc2_files[0]
+    logger.info("Using FC2 file: %s", fc2_path)
+
+    try:
+        lines = get_journal_sales(fc2_path, from_dt, to_dt)
+    except Exception as e:
+        logger.warning("Failed to read FC2 file %s: %s", fc2_path, e)
+        return None
+
+    if not lines:
+        logger.info("No journal lines found in FC2 for the requested period")
+        return None
+
+    return _aggregate_journal_lines(lines)
+
+
+# ── Live Paradox-based sales ─────────────────────────────────────────────
+
+
+def _get_live_sales(from_dt: datetime, to_dt: datetime) -> dict:
+    """
+    Read live Paradox tables (NOTE_ENTETE + NOTE_DETAIL) for active receipts.
+    This is the original approach — works for today's open tickets.
     """
     tmp_dir = safe_copy_tables(REQUIRED_TABLES)
     try:
-        # Read tables
         entetes = read_table(os.path.join(tmp_dir, "NOTE_ENTETE.DB"))
         details = read_table(os.path.join(tmp_dir, "NOTE_DETAIL.DB"))
         articles_raw = read_table(os.path.join(tmp_dir, "ARTICLES.DB"))
 
-        # Build articles lookup  (ART_ID -> article row)
+        # Build articles lookup
         articles_map = {}
         for art in articles_raw:
             art_id = art.get("ART_ID")
             if art_id is not None:
                 articles_map[_normalize_vte_id(art_id) or art_id] = art
 
-        # --- Filter NOTE_ENTETE by date ---
+        # Filter NOTE_ENTETE by date
         date_col = _find_col_name(entetes, _DATE_COL_PREFIX)
         if not date_col:
-            # Fallback: try any column with "DATE" in it
             date_col = _find_col_name(entetes, "VTE_DATE")
 
         valid_vte_ids = set()
-        entete_totals = {}  # VTE_ID -> total TTC
 
         for row in entetes:
-            # Note: VTE_NB_ANNULE = number of voided LINES, not "receipt cancelled"
-            # VTE_CACHE = 1 means the entire receipt is hidden/voided
             vte_cache = row.get("VTE_CACHE")
             if vte_cache is not None:
                 try:
@@ -98,35 +208,14 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
                 vte_id = _normalize_vte_id(row.get("VTE_ID"))
                 if vte_id is not None:
                     valid_vte_ids.add(vte_id)
-                    # Capture the receipt total for reference
-                    total_ttc = _find_col(row, "VTE_TOTAL_TTC")
-                    if total_ttc is not None:
-                        try:
-                            entete_totals[vte_id] = float(total_ttc)
-                        except (ValueError, TypeError):
-                            pass
 
         logger.info(
-            "Found %d receipts in period %s -> %s (date column: %s)",
+            "Live Paradox: %d receipts in period (date column: %s)",
             len(valid_vte_ids),
-            from_dt.isoformat(),
-            to_dt.isoformat(),
             date_col or "(not found)",
         )
 
-        if not valid_vte_ids and entetes:
-            # Log sample dates for debugging
-            sample_dates = []
-            for row in entetes[:5]:
-                d = row.get(date_col) if date_col else None
-                sample_dates.append(str(d))
-            logger.warning(
-                "No receipts matched the date filter. "
-                "Sample dates from NOTE_ENTETE: %s",
-                sample_dates,
-            )
-
-        # --- Aggregate NOTE_DETAIL by ART_ID ---
+        # Aggregate NOTE_DETAIL
         agg = defaultdict(
             lambda: {
                 "quantitySold": 0.0,
@@ -141,7 +230,6 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
             if vte_id not in valid_vte_ids:
                 continue
 
-            # Skip voided / hidden lines
             vte_cache = line.get("VTE_CACHE")
             if vte_cache is not None:
                 try:
@@ -150,7 +238,6 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
                 except (ValueError, TypeError):
                     pass
 
-            # Skip non-article lines (subtotals, payments, separators)
             art_id = line.get("ART_ID")
             if art_id is None:
                 continue
@@ -166,7 +253,6 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
                 except (ValueError, TypeError):
                     pass
 
-            # Selling price — try VTE_PRIX_DE_VENTE first, then VTE_PVHT
             price = 0
             for price_col in ("VTE_PRIX_DE_VENTE", "VTE_PRIX_DE_V", "VTE_PVHT"):
                 raw_price = _find_col(line, price_col)
@@ -177,7 +263,6 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
                     except (ValueError, TypeError):
                         pass
 
-            # Handle discount
             remise = 0
             raw_remise = line.get("VTE_REMISE")
             if raw_remise is not None:
@@ -193,7 +278,6 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
             agg[art_id_norm]["unitPrice"] = price
             agg[art_id_norm]["transactions"].add(vte_id)
 
-        # --- Build response ---
         sales = []
         total_revenue = 0.0
         all_transactions = set()
@@ -204,30 +288,120 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
             total_revenue += revenue
             all_transactions.update(data["transactions"])
 
-            sales.append(
-                {
-                    "posArticleId": str(art_id),
-                    "barcode": article.get("ART_BARCODE") or None,
-                    "articleName": article.get("ART_ARTICLE", f"Unknown ({art_id})"),
-                    "quantitySold": round(data["quantitySold"], 3),
-                    "weightSoldKg": None,  # V2: check unit type
-                    "totalRevenue": revenue,
-                    "unitPrice": round(data["unitPrice"], 2),
-                    "transactionCount": len(data["transactions"]),
-                }
-            )
+            sales.append({
+                "posArticleId": str(art_id),
+                "barcode": article.get("ART_BARCODE") or None,
+                "articleName": article.get("ART_ARTICLE", f"Unknown ({art_id})"),
+                "quantitySold": round(data["quantitySold"], 3),
+                "weightSoldKg": None,
+                "totalRevenue": revenue,
+                "unitPrice": round(data["unitPrice"], 2),
+                "transactionCount": len(data["transactions"]),
+                "classification": None,
+            })
 
-        now = datetime.now().astimezone()
         return {
             "sales": sales,
-            "metadata": {
-                "periodFrom": from_dt.isoformat(),
-                "periodTo": to_dt.isoformat(),
-                "totalTransactions": len(all_transactions),
-                "totalRevenue": round(total_revenue, 2),
-                "generatedAt": now.isoformat(),
-            },
+            "totalRevenue": round(total_revenue, 2),
+            "totalTransactions": len(all_transactions),
         }
-
     finally:
         cleanup_temp(tmp_dir)
+
+
+# ── Public API ───────────────────────────────────────────────────────────
+
+
+def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
+    """
+    Get aggregated sales per product for a given period.
+
+    Strategy:
+      1. Try FC2 journals first (historical closed sales)
+      2. Also check live Paradox (today's active receipts)
+      3. Merge both sources (FC2 has closed data, Paradox has open tickets)
+
+    Returns dict matching the ProtoCart SalesResponse schema.
+    """
+    fc2_result = None
+    live_result = None
+    source = "none"
+
+    # Try FC2 journals for historical data
+    try:
+        fc2_result = _get_fc2_sales(from_dt, to_dt)
+        if fc2_result and fc2_result["sales"]:
+            source = "fc2"
+            logger.info(
+                "FC2: %d articles, %.2f DH revenue",
+                len(fc2_result["sales"]),
+                fc2_result["totalRevenue"],
+            )
+    except Exception as e:
+        logger.warning("FC2 read failed: %s", e)
+
+    # Try live Paradox for today's active receipts
+    try:
+        live_result = _get_live_sales(from_dt, to_dt)
+        if live_result and live_result["sales"]:
+            if source == "fc2":
+                source = "fc2+live"
+            else:
+                source = "live"
+            logger.info(
+                "Live: %d articles, %.2f DH revenue",
+                len(live_result["sales"]),
+                live_result["totalRevenue"],
+            )
+    except Exception as e:
+        logger.warning("Live Paradox read failed: %s", e)
+
+    # Merge results
+    merged_sales = {}  # key -> sale dict
+    total_transactions = set()
+
+    for result in [fc2_result, live_result]:
+        if not result or not result["sales"]:
+            continue
+        for sale in result["sales"]:
+            key = sale["posArticleId"]
+            if key in merged_sales:
+                existing = merged_sales[key]
+                existing["quantitySold"] += sale["quantitySold"]
+                existing["totalRevenue"] += sale["totalRevenue"]
+                existing["transactionCount"] += sale["transactionCount"]
+                # Keep the higher unit price (more recent)
+                if sale["unitPrice"] > existing["unitPrice"]:
+                    existing["unitPrice"] = sale["unitPrice"]
+                # Fill in missing fields
+                if not existing.get("articleName") or existing["articleName"].startswith("Unknown"):
+                    existing["articleName"] = sale["articleName"]
+                if not existing.get("classification") and sale.get("classification"):
+                    existing["classification"] = sale["classification"]
+                if not existing.get("barcode") and sale.get("barcode"):
+                    existing["barcode"] = sale["barcode"]
+            else:
+                merged_sales[key] = dict(sale)
+
+    sales = list(merged_sales.values())
+    total_revenue = sum(s["totalRevenue"] for s in sales)
+
+    # Count total unique transactions
+    total_txn_count = 0
+    if fc2_result:
+        total_txn_count += fc2_result["totalTransactions"]
+    if live_result:
+        total_txn_count += live_result["totalTransactions"]
+
+    now = datetime.now().astimezone()
+    return {
+        "sales": sales,
+        "metadata": {
+            "periodFrom": from_dt.isoformat(),
+            "periodTo": to_dt.isoformat(),
+            "totalTransactions": total_txn_count,
+            "totalRevenue": round(total_revenue, 2),
+            "generatedAt": now.isoformat(),
+            "source": source,
+        },
+    }
