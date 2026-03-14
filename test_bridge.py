@@ -750,6 +750,8 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
     {CYAN}search <TABLE> <COL> <VAL>{RESET}  Filter rows where COL contains VAL
     {CYAN}sales <from> <to>{RESET}        Test sales query (dates as YYYY-MM-DD)
     {CYAN}sales today{RESET}              Sales for today (04:00 -> 23:59)
+    {CYAN}fc2 <path> <from> <to>{RESET}  Read sales from FC2 file (dates as YYYY-MM-DD)
+    {CYAN}fc2 <path> list{RESET}         List journals in FC2 file
     {CYAN}export <TABLE> <file>{RESET}    Export to .csv / .txt / .xlsx
     {CYAN}exportq <file>{RESET}           Export last query result
     {CYAN}quit{RESET}                     Exit
@@ -942,6 +944,96 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     cprint(YELLOW, "  Check: Are there receipts in NOTE_ENTETE for this date?")
                     cprint(YELLOW, "  Try: read NOTE_ENTETE   then look at VTE_DATE_DE_LA_PIECE values")
                     cprint(YELLOW, "  Tip: After daily closing, data is purged. Try 'sales today'.")
+
+            # ---- fc2 ----
+            elif cmd == "fc2" and len(parts) >= 2:
+                from app.services.fc2_reader import (
+                    extract_journals, parse_journal_lines,
+                    get_journal_sales, parse_jv_filename,
+                    list_fc2_files,
+                )
+                from app.services.sales_service import _aggregate_journal_lines
+
+                fc2_path = parts[1]
+
+                if not os.path.isfile(fc2_path):
+                    # Maybe it's a directory — find FC2 files
+                    if os.path.isdir(fc2_path):
+                        fc2_files = list_fc2_files(fc2_path)
+                        if fc2_files:
+                            cprint(GREEN, f"  Found {len(fc2_files)} FC2 files:")
+                            for f in fc2_files:
+                                size_mb = os.path.getsize(f) / 1024 / 1024
+                                mtime = datetime.fromtimestamp(os.path.getmtime(f))
+                                print(f"    {os.path.basename(f):40s}  {size_mb:6.1f} MB  modified: {mtime.strftime('%Y-%m-%d %H:%M')}")
+                        else:
+                            cprint(RED, f"  No .FC2 files found in {fc2_path}")
+                        continue
+                    cprint(RED, f"  File not found: {fc2_path}")
+                    continue
+
+                if len(parts) >= 3 and parts[2].lower() == "list":
+                    # List journals in FC2 file
+                    cprint(DIM, f"  Reading {fc2_path}...")
+                    journals = extract_journals(fc2_path, "JV")
+                    print(f"\n  {CYAN}Sales Journals (JV){RESET}: {len(journals)} files\n")
+                    for fname in sorted(journals.keys()):
+                        parsed = parse_jv_filename(fname)
+                        lines_count = len(journals[fname].strip().split("\n")) - 1
+                        month_label = f"  ({parsed[0]:02d}/{parsed[1]})" if parsed else ""
+                        print(f"    {fname:20s}  {lines_count:6d} data lines{month_label}")
+
+                    jr_journals = extract_journals(fc2_path, "JR")
+                    print(f"\n  {CYAN}Payment Journals (JR){RESET}: {len(jr_journals)} files")
+
+                elif len(parts) >= 4:
+                    # fc2 <path> <from> <to>
+                    from_str = parts[2]
+                    to_str = parts[3]
+                    if "T" not in from_str:
+                        from_str += "T00:00:00"
+                    if "T" not in to_str:
+                        to_str += "T23:59:59"
+
+                    from app.utils.date_utils import parse_iso
+                    from_dt = parse_iso(from_str)
+                    to_dt = parse_iso(to_str)
+
+                    cprint(DIM, f"  Reading FC2: {os.path.basename(fc2_path)}")
+                    cprint(DIM, f"  Period: {from_dt.date()} to {to_dt.date()}...")
+
+                    sale_lines = get_journal_sales(fc2_path, from_dt, to_dt)
+                    result = _aggregate_journal_lines(sale_lines)
+                    sales_data = result["sales"]
+                    last_result = sales_data
+
+                    print()
+                    cprint(BOLD, f"  FC2 Sales Results: {len(sales_data)} articles sold")
+                    separator()
+                    print(f"  Total transactions: {result['totalTransactions']}")
+                    print(f"  Total revenue:      {result['totalRevenue']:,.2f} DH")
+                    print(f"  Raw line items:     {len(sale_lines)}")
+
+                    if sale_lines:
+                        dates = sorted(set(l["date"].date() for l in sale_lines))
+                        print(f"  Days with data:     {len(dates)} ({dates[0]} to {dates[-1]})")
+
+                    print()
+                    if sales_data:
+                        print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'Price':>8s} {'Txns':>6s}  {'Category'}")
+                        separator()
+                        for s in sorted(sales_data, key=lambda x: x["totalRevenue"], reverse=True)[:30]:
+                            name = (s["articleName"] or "?")[:30]
+                            cat = (s.get("classification") or "")[:20]
+                            print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:8.2f} {s['transactionCount']:6d}  {cat}")
+                        if len(sales_data) > 30:
+                            print(f"  ... and {len(sales_data) - 30} more articles")
+                    else:
+                        cprint(YELLOW, "  No sales found for this period in the FC2 file.")
+                else:
+                    cprint(YELLOW, "  Usage: fc2 <path> list")
+                    cprint(YELLOW, "         fc2 <path> <from-date> <to-date>")
+                    cprint(YELLOW, "  Example: fc2 C:\\path\\to\\file.FC2 2024-11-01 2024-11-30")
 
             # ---- export ----
             elif cmd == "export" and len(parts) >= 3:
