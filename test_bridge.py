@@ -965,18 +965,35 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                         continue
 
                 # Build articles lookup for names
+                # Use cached data if available (already properly read with companion files)
+                # Otherwise use safe_copy_single to get .PX/.MB companions for correct parsing
+                articles_map = {}
                 try:
-                    art_path = os.path.join(saveurs_path, "ARTICLES.DB")
-                    articles_raw = _read_table(art_path)
-                    articles_map = {}
+                    if "ARTICLES" in cached and cached["ARTICLES"]:
+                        articles_raw = cached["ARTICLES"]
+                        cprint(DIM, f"  ARTICLES: using cached data ({len(articles_raw)} rows)")
+                    else:
+                        cprint(DIM, f"  ARTICLES: copying with companion files...")
+                        art_tmp, art_err = safe_copy_single("ARTICLES", saveurs_path)
+                        if art_err:
+                            raise RuntimeError(art_err)
+                        try:
+                            articles_raw = _read_table(os.path.join(art_tmp, "ARTICLES.DB"))
+                            cached["ARTICLES"] = articles_raw
+                        finally:
+                            cleanup(art_tmp)
+
                     for art in articles_raw:
                         aid = art.get("ART_ID")
                         if aid is not None:
                             try:
-                                articles_map[int(float(aid))] = art
+                                aid_int = int(float(aid))
+                                # Skip corrupted rows (negative IDs or zero)
+                                if aid_int > 0:
+                                    articles_map[aid_int] = art
                             except (ValueError, TypeError):
                                 pass
-                    cprint(DIM, f"  ARTICLES: {len(articles_map)} products loaded")
+                    cprint(DIM, f"  ARTICLES: {len(articles_map)} products mapped")
                 except Exception as e:
                     cprint(YELLOW, f"  Warning: could not load ARTICLES: {e}")
                     articles_map = {}
@@ -1100,9 +1117,15 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 sales_list = []
                 total_revenue = 0.0
                 all_txns = set()
+                mapped_count = 0
+                unmapped_ids = []
 
                 for art_id, data in agg.items():
                     art = articles_map.get(art_id, {})
+                    if art:
+                        mapped_count += 1
+                    else:
+                        unmapped_ids.append(art_id)
                     rev = round(data["revenue"], 2)
                     total_revenue += rev
                     all_txns.update(data["txns"])
@@ -1122,6 +1145,10 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 print(f"  Source:             {source}")
                 print(f"  Total transactions: {len(all_txns)}")
                 print(f"  Total revenue:      {total_revenue:,.2f} DH")
+                print(f"  Articles mapped:    {mapped_count}/{len(sales_list)}")
+                if unmapped_ids:
+                    sample = unmapped_ids[:10]
+                    cprint(YELLOW, f"  Unmapped ART_IDs:   {sample}{'...' if len(unmapped_ids) > 10 else ''}")
                 print()
 
                 if sales_list:
