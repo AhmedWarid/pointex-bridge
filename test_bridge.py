@@ -941,6 +941,17 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     try:
                         details = _read_table(vd_path)
                         cprint(DIM, f"  VD: {len(details)} line items")
+                        # Show VD columns and sample data for debugging
+                        if details:
+                            vd_cols = list(details[0].keys())
+                            cprint(DIM, f"  VD columns ({len(vd_cols)}): {', '.join(vd_cols)}")
+                            # Show first row raw values for key fields
+                            sample = details[0]
+                            cprint(DIM, f"  VD sample row:")
+                            for k, v in sample.items():
+                                if v is not None and str(v).strip():
+                                    vs = str(v)[:60]
+                                    cprint(DIM, f"    {k:30s} = {vs}  ({type(v).__name__})")
                     except Exception as e:
                         cprint(RED, f"  Error reading {vd_path}: {e}")
                     if os.path.isfile(ve_path):
@@ -994,9 +1005,37 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                             except (ValueError, TypeError):
                                 pass
                     cprint(DIM, f"  ARTICLES: {len(articles_map)} products mapped")
+                    # Show sample ART_IDs from both sides for debugging
+                    if details and articles_map:
+                        vd_art_ids = set()
+                        for line in details[:50]:
+                            aid = line.get("ART_ID")
+                            if aid is not None:
+                                try:
+                                    vd_art_ids.add(int(float(aid)))
+                                except (ValueError, TypeError):
+                                    pass
+                        art_db_ids = sorted(list(articles_map.keys()))[:10]
+                        vd_sample = sorted(list(vd_art_ids))[:10]
+                        cprint(DIM, f"  ART_IDs from ARTICLES.DB (first 10): {art_db_ids}")
+                        cprint(DIM, f"  ART_IDs from VD file    (first 10): {vd_sample}")
+                        overlap = vd_art_ids & set(articles_map.keys())
+                        cprint(DIM, f"  Overlap: {len(overlap)}/{len(vd_art_ids)} VD IDs found in ARTICLES")
                 except Exception as e:
                     cprint(YELLOW, f"  Warning: could not load ARTICLES: {e}")
                     articles_map = {}
+
+                # Check if VD already has article name columns (ART_ARTICLE, ART_LIBELLE, etc.)
+                if details:
+                    vd_name_col = None
+                    for col_name in details[0].keys():
+                        cu = col_name.upper()
+                        if "ART_ARTICLE" in cu or "ART_LIBELLE" in cu or "LIBELLE" in cu:
+                            vd_name_col = col_name
+                            break
+                    if vd_name_col:
+                        cprint(GREEN, f"  VD has article name column: {vd_name_col}")
+                        cprint(DIM, f"  Sample: {details[0].get(vd_name_col)}")
 
                 # For live tables, filter entetes by date to get valid VTE_IDs
                 if "live" in source:
