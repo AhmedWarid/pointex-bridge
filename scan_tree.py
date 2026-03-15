@@ -1,122 +1,92 @@
 """
-Scan the SAVEURS directory tree and dump structure + Paradox table info.
+Scan the SAVEURS directory tree — compact output.
 Run at the bakery: python scan_tree.py > tree_output.txt
 """
 
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from app.services.paradox_reader import read_table
 
 
-def scan_dir(base_path, output_file=None):
-    out = output_file or sys.stdout
-
+def scan_dir(base_path, out=None):
+    out = out or sys.stdout
     def pr(msg=""):
         print(msg, file=out)
 
-    pr(f"=== SCAN: {base_path} ===")
-    pr(f"Date: {__import__('datetime').datetime.now().isoformat()}")
+    pr(f"SCAN: {base_path}  ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
     pr()
 
-    # Phase 1: Full directory tree
-    pr("=" * 70)
-    pr("PHASE 1: DIRECTORY TREE")
-    pr("=" * 70)
-
     db_files = []
-    txt_files = []
 
+    # Phase 1: Tree — only show .DB and .TXT, skip .PX/.MB/.XG/.VAL
     for root, dirs, files in os.walk(base_path):
-        # Skip very deep paths
         depth = root.replace(base_path, "").count(os.sep)
         if depth > 3:
             continue
 
         rel = os.path.relpath(root, base_path)
-        indent = "  " * depth
-        pr(f"{indent}{rel}/")
+        interesting = [f for f in files if f.upper().endswith((".DB", ".TXT", ".FC2"))]
+        other_count = len(files) - len(interesting)
 
-        for f in sorted(files):
+        if not interesting and not dirs:
+            continue
+
+        indent = "  " * depth
+        pr(f"{indent}[{rel}]")
+
+        for f in sorted(interesting):
             full = os.path.join(root, f)
             try:
-                size = os.path.getsize(full)
-                mtime = os.path.getmtime(full)
-                mdate = __import__('datetime').datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                sz = os.path.getsize(full)
+                mt = datetime.fromtimestamp(os.path.getmtime(full)).strftime("%m/%d %H:%M")
             except OSError:
-                size = 0
-                mdate = "?"
-
-            size_str = f"{size:>10,}"
-            ext = os.path.splitext(f)[1].upper()
-            pr(f"{indent}  {f:45s} {size_str} bytes  {mdate}")
-
-            if ext == ".DB":
+                sz = 0
+                mt = "?"
+            kb = f"{sz // 1024}K"
+            pr(f"{indent}  {f:40s} {kb:>7s}  {mt}")
+            if f.upper().endswith(".DB"):
                 db_files.append(full)
-            if ext == ".TXT":
-                txt_files.append(full)
 
-    # Phase 2: Read every .DB file header (row count + columns)
+        if other_count:
+            pr(f"{indent}  (+{other_count} other files)")
+
+    # Phase 2: Read each .DB — one line per table if empty, details if has rows
     pr()
-    pr("=" * 70)
-    pr("PHASE 2: PARADOX TABLE DETAILS")
-    pr("=" * 70)
+    pr("=" * 60)
+    pr(f"TABLES ({len(db_files)} .DB files)")
+    pr("=" * 60)
 
     for db_path in sorted(db_files):
         rel = os.path.relpath(db_path, base_path)
-        pr(f"\n--- {rel} ---")
         try:
             rows = read_table(db_path)
-            pr(f"  Rows: {len(rows)}")
-            if rows:
+            n = len(rows)
+            if n == 0:
+                pr(f"  {rel:50s}  EMPTY")
+            else:
                 cols = list(rows[0].keys())
-                pr(f"  Columns ({len(cols)}): {', '.join(cols)}")
-                # Show first row values
-                pr(f"  Sample row:")
+                pr(f"\n  {rel}  [{n} rows, {len(cols)} cols]")
+                pr(f"    cols: {', '.join(cols)}")
+                # Show first row compactly
+                parts = []
                 for k, v in rows[0].items():
-                    val_str = str(v)[:80]
-                    pr(f"    {k:35s} = {val_str}")
-                # If there's a date column, show range
+                    s = str(v)[:40]
+                    parts.append(f"{k}={s}")
+                pr(f"    row0: {' | '.join(parts)}")
+                # Date range if any
                 for col in cols:
                     if "DATE" in col.upper():
-                        dates = [r[col] for r in rows if r.get(col) is not None]
+                        dates = [r[col] for r in rows if r.get(col)]
                         if dates:
-                            pr(f"  Date range ({col}): {min(dates)} -> {max(dates)}")
-            else:
-                pr(f"  (empty table)")
+                            pr(f"    {col}: {min(dates)} -> {max(dates)}")
         except Exception as e:
-            pr(f"  ERROR: {e}")
+            pr(f"  {rel:50s}  ERR: {e}")
 
-    # Phase 3: Check TXT files (journal-like?)
-    if txt_files:
-        pr()
-        pr("=" * 70)
-        pr("PHASE 3: TEXT FILES")
-        pr("=" * 70)
-
-        for txt_path in sorted(txt_files):
-            rel = os.path.relpath(txt_path, base_path)
-            size = os.path.getsize(txt_path)
-            pr(f"\n--- {rel} ({size:,} bytes) ---")
-            try:
-                with open(txt_path, "r", encoding="cp1252", errors="replace") as f:
-                    lines = f.readlines()
-                pr(f"  Lines: {len(lines)}")
-                if lines:
-                    pr(f"  Header: {lines[0].strip()[:150]}")
-                if len(lines) > 1:
-                    pr(f"  Line 1: {lines[1].strip()[:150]}")
-                if len(lines) > 2:
-                    pr(f"  Line 2: {lines[2].strip()[:150]}")
-            except Exception as e:
-                pr(f"  ERROR: {e}")
-
-    pr()
-    pr("=== SCAN COMPLETE ===")
-    pr(f"Total .DB files: {len(db_files)}")
-    pr(f"Total .TXT files: {len(txt_files)}")
+    pr(f"\nDone. {len(db_files)} tables scanned.")
 
 
 if __name__ == "__main__":
