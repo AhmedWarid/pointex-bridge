@@ -731,6 +731,96 @@ def test_api_smoke():
 
 
 # ---------------------------------------------------------------------------
+# PDF export for sales reports
+# ---------------------------------------------------------------------------
+
+def _export_sales_pdf(target_date, source, sales_list, by_cat, cat_order, total_revenue, total_txns):
+    """Generate a PDF sales report grouped by category."""
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        cprint(YELLOW, "\n  PDF export requires fpdf2. Install with: pip install fpdf2")
+        return
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    filename = os.path.join(script_dir, f"sales_{target_date.strftime('%Y%m%d')}.pdf")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, f"Rapport des Ventes - {target_date.strftime('%d/%m/%Y')}", ln=True, align="C")
+    pdf.ln(3)
+
+    # Summary
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Source: {source}", ln=True)
+    pdf.cell(0, 6, f"Total articles: {len(sales_list)}  |  Transactions: {total_txns}  |  Chiffre d'affaires: {total_revenue:,.2f} DH", ln=True)
+    pdf.ln(5)
+
+    # Table per category
+    col_widths = [70, 20, 30, 25, 20, 25]  # Article, Qty, Revenue, Price, Txns, Category
+    headers = ["Article", "Qty", "Revenue", "Prix", "Txns"]
+
+    for cat in cat_order:
+        items = sorted(by_cat[cat], key=lambda x: x["totalRevenue"], reverse=True)
+        cat_rev = sum(s["totalRevenue"] for s in items)
+        cat_qty = sum(s["quantitySold"] for s in items)
+
+        # Check if we need a new page (at least 30mm for header + 1 row)
+        if pdf.get_y() > 250:
+            pdf.add_page()
+
+        # Category header
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_fill_color(230, 230, 245)
+        pdf.cell(0, 8, f"  {cat}  ({len(items)} articles, {cat_qty:.0f} items, {cat_rev:,.2f} DH)", ln=True, fill=True)
+
+        # Table header
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(200, 200, 200)
+        for i, h in enumerate(headers):
+            pdf.cell(col_widths[i], 6, h, border=1, fill=True, align="C")
+        pdf.ln()
+
+        # Rows
+        pdf.set_font("Helvetica", "", 8)
+        for s in items:
+            name = (s["articleName"] or "?")[:35]
+            if pdf.get_y() > 275:
+                pdf.add_page()
+                # Re-print header on new page
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.set_fill_color(200, 200, 200)
+                for i, h in enumerate(headers):
+                    pdf.cell(col_widths[i], 6, h, border=1, fill=True, align="C")
+                pdf.ln()
+                pdf.set_font("Helvetica", "", 8)
+
+            pdf.cell(col_widths[0], 5, name, border=1)
+            pdf.cell(col_widths[1], 5, f"{s['quantitySold']:.1f}", border=1, align="R")
+            pdf.cell(col_widths[2], 5, f"{s['totalRevenue']:,.2f}", border=1, align="R")
+            pdf.cell(col_widths[3], 5, f"{s['unitPrice']:.2f}", border=1, align="R")
+            pdf.cell(col_widths[4], 5, f"{s['transactionCount']}", border=1, align="R")
+            pdf.ln()
+
+        pdf.ln(3)
+
+    # Grand total
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 10, f"TOTAL: {total_revenue:,.2f} DH", ln=True, align="R")
+
+    # Footer
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.cell(0, 5, f"Genere le {datetime.now().strftime('%d/%m/%Y %H:%M')} par Pointex Bridge", ln=True, align="C")
+
+    pdf.output(filename)
+    cprint(GREEN, f"\n  PDF exported: {filename}")
+
+
+# ---------------------------------------------------------------------------
 # Interactive query mode
 # ---------------------------------------------------------------------------
 
@@ -896,8 +986,6 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
 
             # ---- sales ----
             elif cmd == "sales":
-                import logging as _logging
-                _logging.getLogger("app.services.paradox_reader").setLevel(_logging.DEBUG)
                 from app.services.paradox_reader import read_table as _read_table
                 from app.utils.date_utils import get_tz
                 from collections import defaultdict as _defaultdict
@@ -943,17 +1031,6 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     try:
                         details = _read_table(vd_path)
                         cprint(DIM, f"  VD: {len(details)} line items")
-                        # Show VD columns and sample data for debugging
-                        if details:
-                            vd_cols = list(details[0].keys())
-                            cprint(DIM, f"  VD columns ({len(vd_cols)}): {', '.join(vd_cols)}")
-                            # Show first row raw values for key fields
-                            sample = details[0]
-                            cprint(DIM, f"  VD sample row:")
-                            for k, v in sample.items():
-                                if v is not None and str(v).strip():
-                                    vs = str(v)[:60]
-                                    cprint(DIM, f"    {k:30s} = {vs}  ({type(v).__name__})")
                     except Exception as e:
                         cprint(RED, f"  Error reading {vd_path}: {e}")
                     if os.path.isfile(ve_path):
@@ -981,7 +1058,7 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 # Always do a fresh read with safe_copy to get companion files
                 articles_map = {}
                 try:
-                    if False and "ARTICLES" in cached and cached["ARTICLES"]:
+                    if "ARTICLES" in cached and cached["ARTICLES"]:
                         articles_raw = cached["ARTICLES"]
                         cprint(DIM, f"  ARTICLES: using cached data ({len(articles_raw)} rows)")
                     else:
@@ -1006,37 +1083,43 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                             except (ValueError, TypeError):
                                 pass
                     cprint(DIM, f"  ARTICLES: {len(articles_map)} products mapped")
-                    # Show sample ART_IDs from both sides for debugging
-                    if details and articles_map:
-                        vd_art_ids = set()
-                        for line in details[:50]:
-                            aid = line.get("ART_ID")
-                            if aid is not None:
-                                try:
-                                    vd_art_ids.add(int(float(aid)))
-                                except (ValueError, TypeError):
-                                    pass
-                        art_db_ids = sorted(list(articles_map.keys()))[:10]
-                        vd_sample = sorted(list(vd_art_ids))[:10]
-                        cprint(DIM, f"  ART_IDs from ARTICLES.DB (first 10): {art_db_ids}")
-                        cprint(DIM, f"  ART_IDs from VD file    (first 10): {vd_sample}")
-                        overlap = vd_art_ids & set(articles_map.keys())
-                        cprint(DIM, f"  Overlap: {len(overlap)}/{len(vd_art_ids)} VD IDs found in ARTICLES")
                 except Exception as e:
                     cprint(YELLOW, f"  Warning: could not load ARTICLES: {e}")
                     articles_map = {}
 
-                # Check if VD already has article name columns (ART_ARTICLE, ART_LIBELLE, etc.)
-                if details:
-                    vd_name_col = None
-                    for col_name in details[0].keys():
-                        cu = col_name.upper()
-                        if "ART_ARTICLE" in cu or "ART_LIBELLE" in cu or "LIBELLE" in cu:
-                            vd_name_col = col_name
-                            break
-                    if vd_name_col:
-                        cprint(GREEN, f"  VD has article name column: {vd_name_col}")
-                        cprint(DIM, f"  Sample: {details[0].get(vd_name_col)}")
+                # Build category lookup: CLS_ID -> category name
+                categories_map = {}
+                try:
+                    if "CLASSEMENT" in cached and cached["CLASSEMENT"]:
+                        cls_raw = cached["CLASSEMENT"]
+                    else:
+                        cls_tmp, cls_err = safe_copy_single("CLASSEMENT", saveurs_path)
+                        if cls_err:
+                            raise RuntimeError(cls_err)
+                        try:
+                            cls_raw = _read_table(os.path.join(cls_tmp, "CLASSEMENT.DB"))
+                            cached["CLASSEMENT"] = cls_raw
+                        finally:
+                            cleanup(cls_tmp)
+                    for cls in cls_raw:
+                        cid = cls.get("CLS_ID")
+                        if cid is not None:
+                            try:
+                                cid_int = int(float(cid))
+                                # Find the name column
+                                cname = cls.get("CLS_CLASSIFICATION") or cls.get("CLS_LIBELLE") or ""
+                                if not cname:
+                                    for k in cls:
+                                        if "CLASSIF" in k.upper() or "LIBELLE" in k.upper():
+                                            cname = cls[k] or ""
+                                            break
+                                if cid_int > 0 and cname:
+                                    categories_map[cid_int] = str(cname).strip()
+                            except (ValueError, TypeError):
+                                pass
+                    cprint(DIM, f"  CLASSEMENT: {len(categories_map)} categories loaded")
+                except Exception as e:
+                    cprint(YELLOW, f"  Warning: could not load CLASSEMENT: {e}")
 
                 # For live tables, filter entetes by date to get valid VTE_IDs
                 if "live" in source:
@@ -1169,6 +1252,16 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     rev = round(data["revenue"], 2)
                     total_revenue += rev
                     all_txns.update(data["txns"])
+                    # Resolve category via ARTICLES.CLS_ID -> CLASSEMENT
+                    cat_name = ""
+                    if art:
+                        cls_id = art.get("CLS_ID")
+                        if cls_id is not None:
+                            try:
+                                cat_name = categories_map.get(int(float(cls_id)), "")
+                            except (ValueError, TypeError):
+                                pass
+
                     sales_list.append({
                         "articleName": art.get("ART_ARTICLE", f"ART#{art_id}"),
                         "posArticleId": str(art_id),
@@ -1176,6 +1269,7 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                         "totalRevenue": rev,
                         "unitPrice": round(data["price"], 2),
                         "transactionCount": len(data["txns"]),
+                        "category": cat_name or "Sans categorie",
                     })
                 last_result = sales_list
 
@@ -1192,13 +1286,32 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 print()
 
                 if sales_list:
-                    print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'Price':>8s} {'Txns':>6s}")
-                    separator()
-                    for s in sorted(sales_list, key=lambda x: x["totalRevenue"], reverse=True)[:40]:
-                        name = (s["articleName"] or "?")[:30]
-                        print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:8.2f} {s['transactionCount']:6d}")
-                    if len(sales_list) > 40:
-                        print(f"  ... and {len(sales_list) - 40} more articles")
+                    # Group by category
+                    by_cat = _defaultdict(list)
+                    for s in sales_list:
+                        by_cat[s.get("category", "Sans categorie")].append(s)
+
+                    # Sort categories by total revenue
+                    cat_order = sorted(
+                        by_cat.keys(),
+                        key=lambda c: sum(s["totalRevenue"] for s in by_cat[c]),
+                        reverse=True,
+                    )
+
+                    for cat in cat_order:
+                        items = sorted(by_cat[cat], key=lambda x: x["totalRevenue"], reverse=True)
+                        cat_rev = sum(s["totalRevenue"] for s in items)
+                        cat_qty = sum(s["quantitySold"] for s in items)
+                        print()
+                        cprint(CYAN, f"  [{cat}]  ({len(items)} articles, {cat_qty:.0f} items, {cat_rev:,.2f} DH)")
+                        print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'Price':>8s} {'Txns':>6s}")
+                        separator()
+                        for s in items:
+                            name = (s["articleName"] or "?")[:30]
+                            print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:8.2f} {s['transactionCount']:6d}")
+
+                    # Auto-export to PDF
+                    _export_sales_pdf(target_date, source, sales_list, by_cat, cat_order, total_revenue, len(all_txns))
                 else:
                     cprint(YELLOW, "  No sales found.")
                     if target_date == today:
