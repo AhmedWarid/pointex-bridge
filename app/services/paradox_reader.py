@@ -391,17 +391,15 @@ def _read_paradox(db_path: str) -> list[dict]:
 
             next_block_num = struct.unpack('<H', block_header[0:2])[0]
             _prev_block = struct.unpack('<H', block_header[2:4])[0]
-            last_rec_in_block = struct.unpack('<h', block_header[4:6])[0]
+            # Bytes 4-5: addDataSize — byte offset of the LAST record in the block
+            # NOT a record count! Divide by record_size to get actual count.
+            add_data_size = struct.unpack('<h', block_header[4:6])[0]
 
             block_num = (offset - data_start) // block_size + 1
-            logger.debug(
-                "%s: block#%d at offset=%d, next=%d, prev=%d, lastRec=%d",
-                table_name, block_num, offset, next_block_num, _prev_block, last_rec_in_block,
-            )
 
             blocks_visited += 1
 
-            if last_rec_in_block < 0:
+            if add_data_size < 0:
                 # Empty/deleted block — follow linked list or stop
                 if next_block_num > 0:
                     offset = data_start + (next_block_num - 1) * block_size
@@ -409,7 +407,21 @@ def _read_paradox(db_path: str) -> list[dict]:
                     break
                 continue
 
-            num_recs_in_block = last_rec_in_block + 1
+            num_recs_in_block = add_data_size // record_size + 1
+            # Sanity check: can't exceed what physically fits in the block
+            max_recs = (block_size - 6) // record_size
+            if num_recs_in_block > max_recs:
+                logger.warning(
+                    "%s: block#%d claims %d records but max is %d, clamping",
+                    table_name, block_num, num_recs_in_block, max_recs,
+                )
+                num_recs_in_block = max_recs
+
+            logger.debug(
+                "%s: block#%d at offset=%d, next=%d, prev=%d, addDataSize=%d, recs=%d",
+                table_name, block_num, offset, next_block_num, _prev_block,
+                add_data_size, num_recs_in_block,
+            )
             rec_offset = offset + 6
 
             for _ in range(num_recs_in_block):
@@ -471,13 +483,16 @@ def _read_paradox(db_path: str) -> list[dict]:
 
                 next_block_num = struct.unpack('<H', block_header[0:2])[0]
                 _prev_block = struct.unpack('<H', block_header[2:4])[0]
-                last_rec_in_block = struct.unpack('<h', block_header[4:6])[0]
+                add_data_size = struct.unpack('<h', block_header[4:6])[0]
 
-                if last_rec_in_block < 0:
+                if add_data_size < 0:
                     offset += block_size
                     continue
 
-                num_recs_in_block = last_rec_in_block + 1
+                num_recs_in_block = add_data_size // record_size + 1
+                max_recs = (block_size - 6) // record_size
+                if num_recs_in_block > max_recs:
+                    num_recs_in_block = max_recs
                 rec_offset = offset + 6
 
                 for _ in range(num_recs_in_block):
