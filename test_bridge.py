@@ -896,6 +896,8 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
 
             # ---- sales ----
             elif cmd == "sales":
+                import logging as _logging
+                _logging.getLogger("app.services.paradox_reader").setLevel(_logging.DEBUG)
                 from app.services.paradox_reader import read_table as _read_table
                 from app.utils.date_utils import get_tz
                 from collections import defaultdict as _defaultdict
@@ -976,11 +978,10 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                         continue
 
                 # Build articles lookup for names
-                # Use cached data if available (already properly read with companion files)
-                # Otherwise use safe_copy_single to get .PX/.MB companions for correct parsing
+                # Always do a fresh read with safe_copy to get companion files
                 articles_map = {}
                 try:
-                    if "ARTICLES" in cached and cached["ARTICLES"]:
+                    if False and "ARTICLES" in cached and cached["ARTICLES"]:
                         articles_raw = cached["ARTICLES"]
                         cprint(DIM, f"  ARTICLES: using cached data ({len(articles_raw)} rows)")
                     else:

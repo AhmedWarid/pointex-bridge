@@ -352,23 +352,37 @@ def _read_paradox(db_path: str) -> list[dict]:
         f.seek(0, 2)
         file_size = f.tell()
 
-        # Read firstBlock pointer from file header (offset 0x0E, 2 bytes LE)
-        # Paradox files use a linked list of data blocks — we must follow it
-        # to avoid reading deleted/free blocks that contain garbage data.
+        # Read block navigation info from file header
         first_block_num = struct.unpack('<H', header[0x0E:0x10])[0] if len(header) >= 0x10 else 0
+        last_block_num = struct.unpack('<H', header[0x10:0x12])[0] if len(header) >= 0x12 else 0
+        num_blocks_used = struct.unpack('<H', header[0x0A:0x0C])[0] if len(header) >= 0x0C else 0
+        num_blocks_total = struct.unpack('<H', header[0x0C:0x0E])[0] if len(header) >= 0x0E else 0
+
+        logger.info(
+            "%s: block_nav: firstBlock=%d, lastBlock=%d, usedBlocks=%d, totalBlocks=%d",
+            table_name, first_block_num, last_block_num, num_blocks_used, num_blocks_total,
+        )
 
         rows = []
         records_read = 0
-        max_blocks = (file_size - data_start) // block_size + 2
+        max_blocks = num_blocks_total + 2 if num_blocks_total > 0 else (file_size - data_start) // block_size + 2
 
+        # Start from firstBlock if available
         if first_block_num > 0:
             offset = data_start + (first_block_num - 1) * block_size
         else:
             offset = data_start
 
         blocks_visited = 0
+        visited_offsets = set()
 
         while offset < file_size and records_read < num_records and blocks_visited < max_blocks:
+            # Prevent infinite loops
+            if offset in visited_offsets:
+                logger.warning("%s: block loop detected at offset %d", table_name, offset)
+                break
+            visited_offsets.add(offset)
+
             # Read block header (6 bytes)
             f.seek(offset)
             block_header = f.read(6)
@@ -378,6 +392,12 @@ def _read_paradox(db_path: str) -> list[dict]:
             next_block_num = struct.unpack('<H', block_header[0:2])[0]
             _prev_block = struct.unpack('<H', block_header[2:4])[0]
             last_rec_in_block = struct.unpack('<h', block_header[4:6])[0]
+
+            block_num = (offset - data_start) // block_size + 1
+            logger.debug(
+                "%s: block#%d at offset=%d, next=%d, prev=%d, lastRec=%d",
+                table_name, block_num, offset, next_block_num, _prev_block, last_rec_in_block,
+            )
 
             blocks_visited += 1
 
@@ -420,14 +440,68 @@ def _read_paradox(db_path: str) -> list[dict]:
                 rec_offset += record_size
                 records_read += 1
 
-            # Follow linked list to next block (NOT sequential increment)
+            # Follow linked list to next block
             if next_block_num > 0:
                 next_offset = data_start + (next_block_num - 1) * block_size
                 if next_offset == offset:
-                    break  # self-referencing, prevent infinite loop
+                    break  # self-referencing
                 offset = next_offset
             else:
                 break  # end of chain
+
+        # If linked list gave fewer records than expected, try sequential scan
+        if records_read < num_records:
+            logger.warning(
+                "%s: linked list traversal got %d/%d records (%d blocks). "
+                "Trying sequential block scan for remaining records...",
+                table_name, records_read, num_records, blocks_visited,
+            )
+            # Sequential scan — skip already-visited blocks
+            offset = data_start
+            while offset < file_size and records_read < num_records:
+                if offset in visited_offsets:
+                    offset += block_size
+                    continue
+                visited_offsets.add(offset)
+
+                f.seek(offset)
+                block_header = f.read(6)
+                if len(block_header) < 6:
+                    break
+
+                next_block_num = struct.unpack('<H', block_header[0:2])[0]
+                _prev_block = struct.unpack('<H', block_header[2:4])[0]
+                last_rec_in_block = struct.unpack('<h', block_header[4:6])[0]
+
+                if last_rec_in_block < 0:
+                    offset += block_size
+                    continue
+
+                num_recs_in_block = last_rec_in_block + 1
+                rec_offset = offset + 6
+
+                for _ in range(num_recs_in_block):
+                    if records_read >= num_records:
+                        break
+                    f.seek(rec_offset)
+                    record_data = f.read(record_size)
+                    if len(record_data) < record_size:
+                        break
+                    if record_data == b'\x00' * record_size:
+                        rec_offset += record_size
+                        continue
+                    row = {}
+                    pos = 0
+                    for i, (ftype, fsize) in enumerate(fields):
+                        raw = record_data[pos:pos + fsize]
+                        name = field_names[i] if i < len(field_names) else f"FIELD_{i+1}"
+                        row[name] = _decode_field(ftype, raw)
+                        pos += fsize
+                    rows.append(row)
+                    rec_offset += record_size
+                    records_read += 1
+
+                offset += block_size
 
         logger.info("%s: read %d/%d records", table_name, records_read, num_records)
         return rows
