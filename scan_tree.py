@@ -21,6 +21,7 @@ def scan_dir(base_path, out=None):
     pr()
 
     db_files = []
+    txt_files = []
 
     # Phase 1: Tree — only show .DB and .TXT, skip .PX/.MB/.XG/.VAL
     for root, dirs, files in os.walk(base_path):
@@ -50,6 +51,8 @@ def scan_dir(base_path, out=None):
             pr(f"{indent}  {f:40s} {kb:>7s}  {mt}")
             if f.upper().endswith(".DB"):
                 db_files.append(full)
+            elif f.upper().endswith(".TXT"):
+                txt_files.append(full)
 
         if other_count:
             pr(f"{indent}  (+{other_count} other files)")
@@ -86,7 +89,28 @@ def scan_dir(base_path, out=None):
         except Exception as e:
             pr(f"  {rel:50s}  ERR: {e}")
 
-    pr(f"\nDone. {len(db_files)} tables scanned.")
+    # Phase 3: TXT files — show header + first line (JOURNAUX folder likely has JV/JR)
+    if txt_files:
+        pr()
+        pr("=" * 60)
+        pr(f"TEXT FILES ({len(txt_files)})")
+        pr("=" * 60)
+
+        for txt_path in sorted(txt_files):
+            rel = os.path.relpath(txt_path, base_path)
+            try:
+                sz = os.path.getsize(txt_path)
+                with open(txt_path, "r", encoding="cp1252", errors="replace") as f:
+                    first_lines = [f.readline().strip() for _ in range(3)]
+                lines_preview = first_lines[0][:120]
+                pr(f"  {rel} ({sz // 1024}K)")
+                pr(f"    header: {lines_preview}")
+                if first_lines[1]:
+                    pr(f"    line1:  {first_lines[1][:120]}")
+            except Exception as e:
+                pr(f"  {rel}  ERR: {e}")
+
+    pr(f"\nDone. {len(db_files)} tables, {len(txt_files)} text files scanned.")
 
 
 if __name__ == "__main__":
