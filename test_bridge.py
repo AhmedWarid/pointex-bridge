@@ -1174,34 +1174,50 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     "qty": 0.0, "revenue": 0.0, "price": 0.0, "txns": set()
                 })
 
+                # Diagnostic counters
+                skip_no_art = 0
+                skip_art_zero = 0
+                skip_type_ligne = 0
+                skip_cache = 0
+                lines_counted = 0
+
                 for line in details:
                     art_id = line.get("ART_ID")
                     if art_id is None:
+                        skip_no_art += 1
                         continue
                     try:
                         art_id = int(float(art_id))
                     except (ValueError, TypeError):
+                        skip_no_art += 1
                         continue
                     if art_id == 0:
+                        skip_art_zero += 1
                         continue
 
-                    # Skip non-article lines
+                    # Skip non-article lines (but log what we skip)
                     lt = line.get("VTE_TYPE_LIGNE")
                     if lt is not None:
                         try:
-                            if int(float(lt)) != 0:
+                            lt_val = int(float(lt))
+                            if lt_val != 0:
+                                skip_type_ligne += 1
                                 continue
                         except (ValueError, TypeError):
                             pass
 
-                    # Skip voided lines
+                    # Skip voided lines (but log what we skip)
                     vc = line.get("VTE_CACHE")
                     if vc is not None:
                         try:
-                            if int(float(vc)) != 0:
+                            vc_val = int(float(vc))
+                            if vc_val != 0:
+                                skip_cache += 1
                                 continue
                         except (ValueError, TypeError):
                             pass
+
+                    lines_counted += 1
 
                     qty = 0
                     rq = line.get("VTE_QUANTITE")
@@ -1290,6 +1306,9 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 cprint(BOLD, f"  Sales for {target_date.strftime('%d/%m/%Y')}: {len(sales_list)} articles")
                 separator()
                 print(f"  Source:             {source}")
+                print(f"  Detail lines total: {len(details)}")
+                print(f"  Lines counted:      {lines_counted}")
+                cprint(DIM, f"  Skipped: no ART_ID={skip_no_art}, ART_ID=0={skip_art_zero}, VTE_TYPE_LIGNE!={skip_type_ligne}, VTE_CACHE!={skip_cache}")
                 print(f"  Total transactions: {len(all_txns)}")
                 print(f"  Total revenue:      {total_revenue:,.2f} DH")
                 print(f"  Articles mapped:    {mapped_count}/{len(sales_list)}")
