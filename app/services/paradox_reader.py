@@ -352,23 +352,41 @@ def _read_paradox(db_path: str) -> list[dict]:
         f.seek(0, 2)
         file_size = f.tell()
 
-        rows = []
-        offset = data_start
-        records_read = 0
+        # Read firstBlock pointer from file header (offset 0x0E, 2 bytes LE)
+        # Paradox files use a linked list of data blocks — we must follow it
+        # to avoid reading deleted/free blocks that contain garbage data.
+        first_block_num = struct.unpack('<H', header[0x0E:0x10])[0] if len(header) >= 0x10 else 0
 
-        while offset < file_size and records_read < num_records:
+        rows = []
+        records_read = 0
+        max_blocks = (file_size - data_start) // block_size + 2
+
+        if first_block_num > 0:
+            offset = data_start + (first_block_num - 1) * block_size
+        else:
+            offset = data_start
+
+        blocks_visited = 0
+
+        while offset < file_size and records_read < num_records and blocks_visited < max_blocks:
             # Read block header (6 bytes)
             f.seek(offset)
             block_header = f.read(6)
             if len(block_header) < 6:
                 break
 
-            next_block = struct.unpack('<H', block_header[0:2])[0]
+            next_block_num = struct.unpack('<H', block_header[0:2])[0]
             _prev_block = struct.unpack('<H', block_header[2:4])[0]
             last_rec_in_block = struct.unpack('<h', block_header[4:6])[0]
 
+            blocks_visited += 1
+
             if last_rec_in_block < 0:
-                offset += block_size
+                # Empty/deleted block — follow linked list or stop
+                if next_block_num > 0:
+                    offset = data_start + (next_block_num - 1) * block_size
+                else:
+                    break
                 continue
 
             num_recs_in_block = last_rec_in_block + 1
@@ -402,8 +420,14 @@ def _read_paradox(db_path: str) -> list[dict]:
                 rec_offset += record_size
                 records_read += 1
 
-            # Move to next block
-            offset += block_size
+            # Follow linked list to next block (NOT sequential increment)
+            if next_block_num > 0:
+                next_offset = data_start + (next_block_num - 1) * block_size
+                if next_offset == offset:
+                    break  # self-referencing, prevent infinite loop
+                offset = next_offset
+            else:
+                break  # end of chain
 
         logger.info("%s: read %d/%d records", table_name, records_read, num_records)
         return rows
