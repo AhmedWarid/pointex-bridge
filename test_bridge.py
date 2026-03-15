@@ -1054,23 +1054,18 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                         cprint(RED, f"  Error reading live tables: {e}")
                         continue
 
-                # Build articles lookup for names
-                # Always do a fresh read with safe_copy to get companion files
+                # Build articles lookup for names — always fresh read
                 articles_map = {}
                 try:
-                    if "ARTICLES" in cached and cached["ARTICLES"]:
-                        articles_raw = cached["ARTICLES"]
-                        cprint(DIM, f"  ARTICLES: using cached data ({len(articles_raw)} rows)")
-                    else:
-                        cprint(DIM, f"  ARTICLES: copying with companion files...")
-                        art_tmp, art_err = safe_copy_single("ARTICLES", saveurs_path)
-                        if art_err:
-                            raise RuntimeError(art_err)
-                        try:
-                            articles_raw = _read_table(os.path.join(art_tmp, "ARTICLES.DB"))
-                            cached["ARTICLES"] = articles_raw
-                        finally:
-                            cleanup(art_tmp)
+                    cprint(DIM, f"  ARTICLES: fresh read with companion files...")
+                    art_tmp, art_err = safe_copy_single("ARTICLES", saveurs_path)
+                    if art_err:
+                        raise RuntimeError(art_err)
+                    try:
+                        articles_raw = _read_table(os.path.join(art_tmp, "ARTICLES.DB"))
+                        cached["ARTICLES"] = articles_raw
+                    finally:
+                        cleanup(art_tmp)
 
                     for art in articles_raw:
                         aid = art.get("ART_ID")
@@ -1090,19 +1085,15 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 # Build category lookup: CLS_ID -> category name
                 categories_map = {}
                 try:
-                    if "CLASSIFICATION" in cached and cached["CLASSIFICATION"]:
-                        cls_raw = cached["CLASSIFICATION"]
-                        cprint(DIM, f"  CLASSIFICATION: using cached data ({len(cls_raw)} rows)")
-                    else:
-                        cprint(DIM, f"  CLASSIFICATION: copying with companion files...")
-                        cls_tmp, cls_err = safe_copy_single("CLASSIFICATION", saveurs_path)
-                        if cls_err:
-                            raise RuntimeError(cls_err)
-                        try:
-                            cls_raw = _read_table(os.path.join(cls_tmp, "CLASSIFICATION.DB"))
-                            cached["CLASSIFICATION"] = cls_raw
-                        finally:
-                            cleanup(cls_tmp)
+                    cprint(DIM, f"  CLASSIFICATION: fresh read with companion files...")
+                    cls_tmp, cls_err = safe_copy_single("CLASSIFICATION", saveurs_path)
+                    if cls_err:
+                        raise RuntimeError(cls_err)
+                    try:
+                        cls_raw = _read_table(os.path.join(cls_tmp, "CLASSIFICATION.DB"))
+                        cached["CLASSIFICATION"] = cls_raw
+                    finally:
+                        cleanup(cls_tmp)
                     if cls_raw:
                         # Show columns on first load for debugging
                         cprint(DIM, f"  CLASSIFICATION columns: {list(cls_raw[0].keys())}")
