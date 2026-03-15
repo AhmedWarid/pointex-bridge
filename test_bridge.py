@@ -748,8 +748,9 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
     {CYAN}cols <TABLE>{RESET}             Show column names and types
     {CYAN}count <TABLE>{RESET}            Show row count
     {CYAN}search <TABLE> <COL> <VAL>{RESET}  Filter rows where COL contains VAL
-    {CYAN}sales <from> <to>{RESET}        Test sales query (dates as YYYY-MM-DD)
-    {CYAN}sales today{RESET}              Sales for today (04:00 -> 23:59)
+    {CYAN}sales today{RESET}              Sales for today (live NOTE_ENTETE/DETAIL)
+    {CYAN}sales 14-03-2026{RESET}        Sales for a specific date (AN archive)
+    {CYAN}sales 2026-03-14{RESET}        Also accepts YYYY-MM-DD format
     {CYAN}fc2 <path> <from> <to>{RESET}  Read sales from FC2 file (dates as YYYY-MM-DD)
     {CYAN}fc2 <path> list{RESET}         List journals in FC2 file
     {CYAN}fc2 latest <dir>{RESET}        Auto-find latest FC2, show last day's sales
@@ -895,56 +896,248 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
 
             # ---- sales ----
             elif cmd == "sales":
-                from app.utils.date_utils import parse_iso, get_tz
-                from app.services.sales_service import get_sales
+                from app.services.paradox_reader import read_table as _read_table
+                from app.utils.date_utils import get_tz
+                from collections import defaultdict as _defaultdict
 
-                if len(parts) >= 3:
-                    from_str = parts[1]
-                    to_str = parts[2]
-                elif len(parts) == 2 and parts[1].lower() == "today":
-                    tz = get_tz()
-                    today = datetime.now(tz).date()
-                    from_str = f"{today}T04:00:00"
-                    to_str = f"{today}T23:59:59"
+                # Parse date argument
+                if len(parts) >= 2 and parts[1].lower() == "today":
+                    target_date = datetime.now().date()
+                elif len(parts) >= 2:
+                    # Accept DD-MM-YYYY or YYYY-MM-DD
+                    dstr = parts[1]
+                    try:
+                        if len(dstr) == 10 and dstr[2] == "-":
+                            target_date = datetime.strptime(dstr, "%d-%m-%Y").date()
+                        else:
+                            target_date = datetime.strptime(dstr, "%Y-%m-%d").date()
+                    except ValueError:
+                        cprint(RED, f"  Invalid date: {dstr}")
+                        cprint(YELLOW, "  Usage: sales today  or  sales 14-03-2026  or  sales 2026-03-14")
+                        continue
                 else:
-                    cprint(YELLOW, "  Usage: sales <from> <to>  or  sales today")
-                    cprint(YELLOW, "  Dates as YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS")
+                    cprint(YELLOW, "  Usage: sales today  or  sales 14-03-2026  or  sales 2026-03-14")
                     continue
 
-                if "T" not in from_str:
-                    from_str += "T04:00:00"
-                if "T" not in to_str:
-                    to_str += "T23:59:59"
+                cprint(DIM, f"  Querying sales for {target_date.strftime('%d/%m/%Y')}...")
 
-                from_dt = parse_iso(from_str)
-                to_dt = parse_iso(to_str)
+                # Determine data source
+                today = datetime.now().date()
+                source = "unknown"
 
-                cprint(DIM, f"  Querying sales from {from_dt.isoformat()} to {to_dt.isoformat()}...")
-                result = get_sales(from_dt, to_dt)
+                # Try AN{YYYY}/VD{MMDDYY}.DB first (daily archive after Z closing)
+                year_folder = f"AN{target_date.year}"
+                vd_name = f"VD{target_date.strftime('%m%d')}{target_date.strftime('%y')}"
+                ve_name = f"VE{target_date.strftime('%m%d')}{target_date.strftime('%y')}"
+                vd_path = os.path.join(saveurs_path, year_folder, f"{vd_name}.DB")
+                ve_path = os.path.join(saveurs_path, year_folder, f"{ve_name}.DB")
 
-                sales = result["sales"]
-                meta = result["metadata"]
-                last_result = sales
+                details = []
+                entetes = []
 
-                print()
-                cprint(BOLD, f"  Sales Results: {len(sales)} articles sold")
-                separator()
-                print(f"  Total transactions: {meta['totalTransactions']}")
-                print(f"  Total revenue:      {meta['totalRevenue']:.2f} DH")
-                print(f"  Period:             {meta['periodFrom']} -> {meta['periodTo']}")
-                print()
-
-                if sales:
-                    print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'UnitPrice':>10s} {'Txns':>6s}")
-                    separator()
-                    for s in sorted(sales, key=lambda x: x["totalRevenue"], reverse=True):
-                        name = (s["articleName"] or "?")[:30]
-                        print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:10.2f} {s['transactionCount']:6d}")
+                if os.path.isfile(vd_path):
+                    source = f"{year_folder}/{vd_name}"
+                    cprint(DIM, f"  Source: {source} (daily archive)")
+                    try:
+                        details = _read_table(vd_path)
+                        cprint(DIM, f"  VD: {len(details)} line items")
+                    except Exception as e:
+                        cprint(RED, f"  Error reading {vd_path}: {e}")
+                    if os.path.isfile(ve_path):
+                        try:
+                            entetes = _read_table(ve_path)
+                            cprint(DIM, f"  VE: {len(entetes)} receipts")
+                        except Exception as e:
+                            cprint(RED, f"  Error reading {ve_path}: {e}")
                 else:
-                    cprint(YELLOW, "  No sales found for this period.")
-                    cprint(YELLOW, "  Check: Are there receipts in NOTE_ENTETE for this date?")
-                    cprint(YELLOW, "  Try: read NOTE_ENTETE   then look at VTE_DATE_DE_LA_PIECE values")
-                    cprint(YELLOW, "  Tip: After daily closing, data is purged. Try 'sales today'.")
+                    # Fall back to live NOTE_ENTETE + NOTE_DETAIL
+                    source = "NOTE_ENTETE/NOTE_DETAIL (live)"
+                    cprint(DIM, f"  No archive found at {vd_path}")
+                    cprint(DIM, f"  Falling back to live tables...")
+                    try:
+                        ne_path = os.path.join(saveurs_path, "NOTE_ENTETE.DB")
+                        nd_path = os.path.join(saveurs_path, "NOTE_DETAIL.DB")
+                        entetes = _read_table(ne_path)
+                        details = _read_table(nd_path)
+                        cprint(DIM, f"  NOTE_ENTETE: {len(entetes)} rows, NOTE_DETAIL: {len(details)} rows")
+                    except Exception as e:
+                        cprint(RED, f"  Error reading live tables: {e}")
+                        continue
+
+                # Build articles lookup for names
+                try:
+                    art_path = os.path.join(saveurs_path, "ARTICLES.DB")
+                    articles_raw = _read_table(art_path)
+                    articles_map = {}
+                    for art in articles_raw:
+                        aid = art.get("ART_ID")
+                        if aid is not None:
+                            try:
+                                articles_map[int(float(aid))] = art
+                            except (ValueError, TypeError):
+                                pass
+                    cprint(DIM, f"  ARTICLES: {len(articles_map)} products loaded")
+                except Exception as e:
+                    cprint(YELLOW, f"  Warning: could not load ARTICLES: {e}")
+                    articles_map = {}
+
+                # For live tables, filter entetes by date to get valid VTE_IDs
+                if "live" in source:
+                    valid_vte_ids = set()
+                    for row in entetes:
+                        # Skip hidden/voided receipts
+                        vc = row.get("VTE_CACHE")
+                        if vc is not None:
+                            try:
+                                if int(float(vc)) != 0:
+                                    continue
+                            except (ValueError, TypeError):
+                                pass
+                        # Check date
+                        for dk in row:
+                            if "DATE_DE_LA" in dk.upper():
+                                d = row[dk]
+                                if d is not None and hasattr(d, "date"):
+                                    if d.date() == target_date:
+                                        vid = row.get("VTE_ID")
+                                        if vid is not None:
+                                            try:
+                                                valid_vte_ids.add(int(float(vid)))
+                                            except (ValueError, TypeError):
+                                                pass
+                                break
+                    cprint(DIM, f"  Receipts matching {target_date}: {len(valid_vte_ids)}")
+                    # Filter details to only matching VTE_IDs
+                    filtered = []
+                    for line in details:
+                        vid = line.get("VTE_ID")
+                        if vid is not None:
+                            try:
+                                if int(float(vid)) in valid_vte_ids:
+                                    filtered.append(line)
+                            except (ValueError, TypeError):
+                                pass
+                    details = filtered
+                    cprint(DIM, f"  Detail lines for date: {len(details)}")
+
+                # Aggregate by ART_ID
+                agg = _defaultdict(lambda: {
+                    "qty": 0.0, "revenue": 0.0, "price": 0.0, "txns": set()
+                })
+
+                for line in details:
+                    art_id = line.get("ART_ID")
+                    if art_id is None:
+                        continue
+                    try:
+                        art_id = int(float(art_id))
+                    except (ValueError, TypeError):
+                        continue
+                    if art_id == 0:
+                        continue
+
+                    # Skip non-article lines
+                    lt = line.get("VTE_TYPE_LIGNE")
+                    if lt is not None:
+                        try:
+                            if int(float(lt)) != 0:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Skip voided lines
+                    vc = line.get("VTE_CACHE")
+                    if vc is not None:
+                        try:
+                            if int(float(vc)) != 0:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
+                    qty = 0
+                    rq = line.get("VTE_QUANTITE")
+                    if rq is not None:
+                        try:
+                            qty = float(rq)
+                        except (ValueError, TypeError):
+                            pass
+
+                    price = 0
+                    rp = line.get("VTE_PRIX_DE_VENTE")
+                    if rp is None:
+                        for k in line:
+                            if k.upper().startswith("VTE_PRIX_DE_V"):
+                                rp = line[k]
+                                break
+                    if rp is not None:
+                        try:
+                            price = float(rp)
+                        except (ValueError, TypeError):
+                            pass
+
+                    remise = 0
+                    rr = line.get("VTE_REMISE")
+                    if rr is not None:
+                        try:
+                            remise = float(rr)
+                        except (ValueError, TypeError):
+                            pass
+
+                    eff_price = price * (1 - remise / 100) if remise else price
+
+                    agg[art_id]["qty"] += qty
+                    agg[art_id]["revenue"] += eff_price * qty
+                    agg[art_id]["price"] = price
+
+                    vid = line.get("VTE_ID")
+                    if vid is not None:
+                        try:
+                            agg[art_id]["txns"].add(int(float(vid)))
+                        except (ValueError, TypeError):
+                            pass
+
+                # Build results
+                sales_list = []
+                total_revenue = 0.0
+                all_txns = set()
+
+                for art_id, data in agg.items():
+                    art = articles_map.get(art_id, {})
+                    rev = round(data["revenue"], 2)
+                    total_revenue += rev
+                    all_txns.update(data["txns"])
+                    sales_list.append({
+                        "articleName": art.get("ART_ARTICLE", f"ART#{art_id}"),
+                        "posArticleId": str(art_id),
+                        "quantitySold": round(data["qty"], 3),
+                        "totalRevenue": rev,
+                        "unitPrice": round(data["price"], 2),
+                        "transactionCount": len(data["txns"]),
+                    })
+                last_result = sales_list
+
+                print()
+                cprint(BOLD, f"  Sales for {target_date.strftime('%d/%m/%Y')}: {len(sales_list)} articles")
+                separator()
+                print(f"  Source:             {source}")
+                print(f"  Total transactions: {len(all_txns)}")
+                print(f"  Total revenue:      {total_revenue:,.2f} DH")
+                print()
+
+                if sales_list:
+                    print(f"  {'Article':30s} {'Qty':>8s} {'Revenue':>10s} {'Price':>8s} {'Txns':>6s}")
+                    separator()
+                    for s in sorted(sales_list, key=lambda x: x["totalRevenue"], reverse=True)[:40]:
+                        name = (s["articleName"] or "?")[:30]
+                        print(f"  {name:30s} {s['quantitySold']:8.1f} {s['totalRevenue']:10.2f} {s['unitPrice']:8.2f} {s['transactionCount']:6d}")
+                    if len(sales_list) > 40:
+                        print(f"  ... and {len(sales_list) - 40} more articles")
+                else:
+                    cprint(YELLOW, "  No sales found.")
+                    if target_date == today:
+                        cprint(YELLOW, "  If the shop is open, data may not be flushed yet.")
+                    else:
+                        cprint(YELLOW, f"  Check if {vd_path} exists.")
 
             # ---- fc2 ----
             elif cmd == "fc2" and len(parts) >= 2:
