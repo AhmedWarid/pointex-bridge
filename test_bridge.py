@@ -1090,36 +1090,54 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                 # Build category lookup: CLS_ID -> category name
                 categories_map = {}
                 try:
-                    if "CLASSEMENT" in cached and cached["CLASSEMENT"]:
-                        cls_raw = cached["CLASSEMENT"]
+                    if "CLASSIFICATION" in cached and cached["CLASSIFICATION"]:
+                        cls_raw = cached["CLASSIFICATION"]
+                        cprint(DIM, f"  CLASSIFICATION: using cached data ({len(cls_raw)} rows)")
                     else:
-                        cls_tmp, cls_err = safe_copy_single("CLASSEMENT", saveurs_path)
+                        cprint(DIM, f"  CLASSIFICATION: copying with companion files...")
+                        cls_tmp, cls_err = safe_copy_single("CLASSIFICATION", saveurs_path)
                         if cls_err:
                             raise RuntimeError(cls_err)
                         try:
-                            cls_raw = _read_table(os.path.join(cls_tmp, "CLASSEMENT.DB"))
-                            cached["CLASSEMENT"] = cls_raw
+                            cls_raw = _read_table(os.path.join(cls_tmp, "CLASSIFICATION.DB"))
+                            cached["CLASSIFICATION"] = cls_raw
                         finally:
                             cleanup(cls_tmp)
+                    if cls_raw:
+                        # Show columns on first load for debugging
+                        cprint(DIM, f"  CLASSIFICATION columns: {list(cls_raw[0].keys())}")
                     for cls in cls_raw:
                         cid = cls.get("CLS_ID")
                         if cid is not None:
                             try:
                                 cid_int = int(float(cid))
-                                # Find the name column
-                                cname = cls.get("CLS_CLASSIFICATION") or cls.get("CLS_LIBELLE") or ""
+                                # Find the name column — try common Pointex patterns
+                                cname = ""
+                                for key_pattern in ["CLS_CLASSIFICATION", "CLS_LIBELLE", "CLS_NOM", "CLS_DESIGN"]:
+                                    val = cls.get(key_pattern)
+                                    if val:
+                                        cname = str(val).strip()
+                                        break
+                                # Fallback: search for any column with text content
                                 if not cname:
-                                    for k in cls:
-                                        if "CLASSIF" in k.upper() or "LIBELLE" in k.upper():
-                                            cname = cls[k] or ""
+                                    for k, v in cls.items():
+                                        if k.upper() != "CLS_ID" and isinstance(v, str) and v.strip():
+                                            cname = v.strip()
                                             break
-                                if cid_int > 0 and cname:
-                                    categories_map[cid_int] = str(cname).strip()
+                                if cid_int != 0 and cname:
+                                    categories_map[cid_int] = cname
+                                    # Also store absolute value for sign-bit lookup
+                                    categories_map[abs(cid_int)] = cname
                             except (ValueError, TypeError):
                                 pass
-                    cprint(DIM, f"  CLASSEMENT: {len(categories_map)} categories loaded")
+                    cprint(DIM, f"  CLASSIFICATION: {len(categories_map)} categories loaded")
+                    if categories_map:
+                        # Show first few for verification
+                        sample = list(categories_map.items())[:5]
+                        for cid, cname in sample:
+                            cprint(DIM, f"    CLS#{cid}: {cname}")
                 except Exception as e:
-                    cprint(YELLOW, f"  Warning: could not load CLASSEMENT: {e}")
+                    cprint(YELLOW, f"  Warning: could not load CLASSIFICATION: {e}")
 
                 # For live tables, filter entetes by date to get valid VTE_IDs
                 if "live" in source:
@@ -1252,13 +1270,17 @@ def interactive_mode(tables: list[str], cached: dict[str, list[dict]], saveurs_p
                     rev = round(data["revenue"], 2)
                     total_revenue += rev
                     all_txns.update(data["txns"])
-                    # Resolve category via ARTICLES.CLS_ID -> CLASSEMENT
+                    # Resolve category via ARTICLES.CLS_ID -> CLASSIFICATION
                     cat_name = ""
                     if art:
                         cls_id = art.get("CLS_ID")
                         if cls_id is not None:
                             try:
-                                cat_name = categories_map.get(int(float(cls_id)), "")
+                                cls_id_int = int(float(cls_id))
+                                cat_name = categories_map.get(cls_id_int, "")
+                                # Try absolute value if negative (sign-bit issue)
+                                if not cat_name and cls_id_int < 0:
+                                    cat_name = categories_map.get(abs(cls_id_int), "")
                             except (ValueError, TypeError):
                                 pass
 
