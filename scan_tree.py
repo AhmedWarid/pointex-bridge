@@ -1,6 +1,7 @@
 """
 Scan the SAVEURS directory tree — compact output.
-Run at the bakery: python scan_tree.py > tree_output.txt
+Run at the bakery: python scan_tree.py
+Uses SAVEURS_PATH from .env (or default \\CAISSE-PC\firstclass\SAVEURS)
 """
 
 import os
@@ -9,13 +10,20 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Use .env config for the path
+from app.config import settings
 from app.services.paradox_reader import read_table
+
+
+def safe_str(s):
+    """Replace non-ASCII chars to avoid charmap encoding errors on Windows."""
+    return s.encode("ascii", errors="replace").decode("ascii")
 
 
 def scan_dir(base_path, out=None):
     out = out or sys.stdout
     def pr(msg=""):
-        print(msg, file=out)
+        print(safe_str(msg), file=out)
 
     pr(f"SCAN: {base_path}  ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
     pr()
@@ -69,7 +77,7 @@ def scan_dir(base_path, out=None):
             rows = read_table(db_path)
             n = len(rows)
             if n == 0:
-                pr(f"  {rel:50s}  EMPTY")
+                pr(f"  {safe_str(rel):50s}  EMPTY")
             else:
                 cols = list(rows[0].keys())
                 pr(f"\n  {rel}  [{n} rows, {len(cols)} cols]")
@@ -87,7 +95,7 @@ def scan_dir(base_path, out=None):
                         if dates:
                             pr(f"    {col}: {min(dates)} -> {max(dates)}")
         except Exception as e:
-            pr(f"  {rel:50s}  ERR: {e}")
+            pr(f"  {safe_str(rel):50s}  ERR: {e}")
 
     # Phase 3: TXT files — show header + first line (JOURNAUX folder likely has JV/JR)
     if txt_files:
@@ -108,13 +116,13 @@ def scan_dir(base_path, out=None):
                 if first_lines[1]:
                     pr(f"    line1:  {first_lines[1][:120]}")
             except Exception as e:
-                pr(f"  {rel}  ERR: {e}")
+                pr(f"  {safe_str(rel)}  ERR: {e}")
 
     pr(f"\nDone. {len(db_files)} tables, {len(txt_files)} text files scanned.")
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else r"\\CAISSE-PC\firstclass\SAVEURS"
+    path = sys.argv[1] if len(sys.argv) > 1 else settings.saveurs_path
     outfile = sys.argv[2] if len(sys.argv) > 2 else None
 
     if outfile:
