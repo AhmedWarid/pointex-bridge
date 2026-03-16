@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -8,6 +9,40 @@ from app.utils.date_utils import parse_iso
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/pos", tags=["sales"])
+
+
+@router.get("/sales/{date}")
+async def sales_by_date(date: str):
+    """
+    Get aggregated sales for a single date.
+    Accepts YYYY-MM-DD format (e.g. 2026-03-15).
+    """
+    try:
+        target = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid date format: '{date}'. Use YYYY-MM-DD.",
+        )
+
+    from_dt = target.replace(hour=0, minute=0, second=0)
+    to_dt = target.replace(hour=23, minute=59, second=59)
+
+    try:
+        return get_sales(from_dt, to_dt)
+    except PermissionError:
+        raise HTTPException(
+            status_code=503,
+            detail="POS data unavailable — files are locked by the POS system",
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="POS data unavailable — cannot reach CAISSE-PC",
+        )
+    except Exception:
+        logger.exception("Error reading sales data for %s", date)
+        raise HTTPException(status_code=500, detail="Internal error reading sales data")
 
 
 @router.get("/sales")

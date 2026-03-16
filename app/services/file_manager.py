@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import date
 
 from app.config import settings
 
@@ -104,6 +105,24 @@ def safe_copy_tables(table_names: list[str]) -> str:
         return settings.saveurs_path
 
     return tmp_dir
+
+
+def get_archive_paths(target_date: date) -> tuple[str | None, str | None]:
+    """
+    Return (vd_path, ve_path) for a date's daily archive files.
+    VD = detail lines, VE = receipt headers.
+    Returns None for each file that doesn't exist.
+    Archive files are static (written after Z closing) so no safe_copy needed.
+    """
+    year_folder = f"AN{target_date.year}"
+    vd_name = f"VD{target_date.strftime('%m%d%y')}.DB"
+    ve_name = f"VE{target_date.strftime('%m%d%y')}.DB"
+    vd_path = os.path.join(settings.saveurs_path, year_folder, vd_name)
+    ve_path = os.path.join(settings.saveurs_path, year_folder, ve_name)
+    return (
+        vd_path if os.path.isfile(vd_path) else None,
+        ve_path if os.path.isfile(ve_path) else None,
+    )
 
 
 def cleanup_temp(tmp_dir: str):

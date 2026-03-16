@@ -8,6 +8,7 @@ class SaleItem(BaseModel):
     posArticleId: str
     barcode: Optional[str] = None
     articleName: str
+    category: Optional[str] = None
     quantitySold: Optional[float] = None
     weightSoldKg: Optional[float] = None
     totalRevenue: float
@@ -21,6 +22,7 @@ class SalesMetadata(BaseModel):
     totalTransactions: int
     totalRevenue: float
     generatedAt: str
+    source: str = "unknown"
 
 
 class SalesResponse(BaseModel):
