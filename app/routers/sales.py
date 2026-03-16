@@ -3,6 +3,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.config import settings
 from app.services.sales_service import get_sales
 from app.utils.date_utils import parse_iso
 
@@ -56,6 +57,17 @@ async def sales(
         to_dt = parse_iso(to)
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=422, detail=f"Invalid date format: {e}")
+
+    # Prevent abuse: limit date range
+    max_days = settings.max_sales_range_days
+    delta = (to_dt - from_dt).days
+    if delta < 0:
+        raise HTTPException(status_code=422, detail="'from' must be before 'to'")
+    if delta > max_days:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Date range too large: {delta} days (max {max_days})",
+        )
 
     try:
         return get_sales(from_dt, to_dt)

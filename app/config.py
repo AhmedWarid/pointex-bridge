@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     api_port: int = 8470
     api_host: str = "0.0.0.0"
     api_key: str = "change-me-to-a-secret-key"
+    cors_origins: list[str] = ["*"]  # Set specific origins in .env for production
+    max_sales_range_days: int = 31  # Max date range for sales queries
     business_day_start_hour: int = 4
     business_day_end_hour: int = 22
     timezone: str = "Africa/Casablanca"

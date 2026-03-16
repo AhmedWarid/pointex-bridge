@@ -307,36 +307,44 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
     Returns dict matching the SalesResponse schema.
     """
     # Load reference tables (articles + categories) via safe copy
-    tmp_dir = safe_copy_tables(["ARTICLES", "CLASSIFICATION", "NOTE_ENTETE", "NOTE_DETAIL"])
+    tmp_dir = safe_copy_tables(["ARTICLES", "CLASSIFICATION"])
+    live_tmp_dir = None
     try:
         articles_map = _build_articles_map(tmp_dir)
         categories_map = _build_category_map(tmp_dir)
 
         all_details = []
         sources = set()
+        needs_live = False
 
         # Iterate each date in the range
         current = from_dt.date() if hasattr(from_dt, 'date') else from_dt
         end = to_dt.date() if hasattr(to_dt, 'date') else to_dt
 
+        # First pass: collect archive data and identify dates needing live tables
+        dates_needing_live = []
         while current <= end:
             vd_path, ve_path = get_archive_paths(current)
 
             if vd_path:
-                # Archive exists — read directly (no copy needed)
                 archive_details = _read_archive_details(vd_path)
                 all_details.extend(archive_details)
                 sources.add("archive")
             else:
-                # No archive — use live tables filtered by this date
-                day_start = datetime(current.year, current.month, current.day, 0, 0, 0)
-                day_end = datetime(current.year, current.month, current.day, 23, 59, 59)
-                live_details = _read_live_details(day_start, day_end, tmp_dir)
+                dates_needing_live.append(current)
+
+            current += timedelta(days=1)
+
+        # Second pass: copy live tables only if needed
+        if dates_needing_live:
+            live_tmp_dir = safe_copy_tables(["NOTE_ENTETE", "NOTE_DETAIL"])
+            for live_date in dates_needing_live:
+                day_start = datetime(live_date.year, live_date.month, live_date.day, 0, 0, 0)
+                day_end = datetime(live_date.year, live_date.month, live_date.day, 23, 59, 59)
+                live_details = _read_live_details(day_start, day_end, live_tmp_dir)
                 if live_details:
                     all_details.extend(live_details)
                     sources.add("live")
-
-            current += timedelta(days=1)
 
         # Determine source label
         if sources == {"archive", "live"}:
@@ -368,3 +376,5 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
 
     finally:
         cleanup_temp(tmp_dir)
+        if live_tmp_dir:
+            cleanup_temp(live_tmp_dir)
