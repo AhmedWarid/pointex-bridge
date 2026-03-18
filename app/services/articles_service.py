@@ -95,7 +95,7 @@ def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, s
         "barcode": art.get("ART_BARCODE") or None,
         "name": art.get("ART_ARTICLE", ""),
         "category": _resolve_category(art, categories_map),
-        "sellingPrice": None,
+        "sellingPrice": art.get("ART_PVTE"),
         "costPrice": art.get("ART_DEF_PMPA"),
         "unit": "piece",
         "isActive": cache == 0 and valide != 0,

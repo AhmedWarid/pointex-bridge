@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -16,10 +16,13 @@ def parse_iso(dt_str: str) -> datetime:
     return dt
 
 
-def localize_naive(dt: datetime) -> datetime:
-    """Attach the configured timezone to a naive datetime (from Paradox)."""
+def localize_naive(dt) -> datetime:
+    """Attach the configured timezone to a naive datetime (from Paradox).
+    Also handles plain date objects by converting to datetime at midnight."""
     if dt is None:
         return None
+    if isinstance(dt, date) and not isinstance(dt, datetime):
+        dt = datetime(dt.year, dt.month, dt.day)
     if dt.tzinfo is None:
         return dt.replace(tzinfo=get_tz())
     return dt

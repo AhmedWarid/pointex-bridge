@@ -21,7 +21,7 @@ from app.services.file_manager import (
     safe_copy_tables,
 )
 from app.services.paradox_reader import read_table
-from app.utils.date_utils import is_in_period
+from app.utils.date_utils import is_in_period, localize_naive
 
 logger = logging.getLogger(__name__)
 
@@ -339,8 +339,8 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
         if dates_needing_live:
             live_tmp_dir = safe_copy_tables(["NOTE_ENTETE", "NOTE_DETAIL"])
             for live_date in dates_needing_live:
-                day_start = datetime(live_date.year, live_date.month, live_date.day, 0, 0, 0)
-                day_end = datetime(live_date.year, live_date.month, live_date.day, 23, 59, 59)
+                day_start = localize_naive(datetime(live_date.year, live_date.month, live_date.day, 0, 0, 0))
+                day_end = localize_naive(datetime(live_date.year, live_date.month, live_date.day, 23, 59, 59))
                 live_details = _read_live_details(day_start, day_end, live_tmp_dir)
                 if live_details:
                     all_details.extend(live_details)

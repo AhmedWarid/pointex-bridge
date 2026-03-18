@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
 from app.services.sales_service import get_sales
-from app.utils.date_utils import parse_iso
+from app.utils.date_utils import localize_naive, parse_iso
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ async def sales_by_date(date: str):
             detail=f"Invalid date format: '{date}'. Use YYYY-MM-DD.",
         )
 
-    from_dt = target.replace(hour=0, minute=0, second=0)
-    to_dt = target.replace(hour=23, minute=59, second=59)
+    from_dt = localize_naive(target.replace(hour=0, minute=0, second=0))
+    to_dt = localize_naive(target.replace(hour=23, minute=59, second=59))
 
     try:
         return get_sales(from_dt, to_dt)
