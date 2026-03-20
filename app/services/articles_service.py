@@ -2,13 +2,14 @@ import logging
 import os
 from datetime import datetime
 
+from app.config import settings
 from app.services.file_manager import cleanup_temp, safe_copy_tables
 from app.services.paradox_reader import read_table
 from app.utils.date_utils import localize_naive
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_TABLES = ["ARTICLES", "CLASSIFICATION"]
+REQUIRED_TABLES = ["ARTICLES", "CLASSIFICATION", "EST_TARIF_VENTE"]
 
 # Column name prefixes for truncated Paradox column names
 _MODIFIED_PREFIX = "ART_DATE_MODI"
@@ -113,6 +114,27 @@ def _build_price_map(tarif_rows: list[dict]) -> dict[int, float]:
     return prices
 
 
+def _load_reference_data(tmp_dir: str) -> tuple[dict[int, str], dict[int, float]]:
+    """Load category map and price map from a single temp directory."""
+    categories_map = {}
+    cls_path = os.path.join(tmp_dir, "CLASSIFICATION.DB")
+    if os.path.isfile(cls_path):
+        try:
+            categories_map = _build_category_map(read_table(cls_path))
+        except Exception as e:
+            logger.warning("Could not read CLASSIFICATION: %s", e)
+
+    prices_map = {}
+    tarif_path = os.path.join(tmp_dir, "EST_TARIF_VENTE.DB")
+    if os.path.isfile(tarif_path):
+        try:
+            prices_map = _build_price_map(read_table(tarif_path))
+        except Exception as e:
+            logger.warning("Could not read EST_TARIF_VENTE: %s", e)
+
+    return categories_map, prices_map
+
+
 def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, str], prices_map: dict[int, float]) -> dict:
     """Convert a raw Paradox article row to the API response shape."""
     mod_date = art.get(mod_col) if mod_col else None
@@ -123,8 +145,8 @@ def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, s
     valide = art.get("ART_VALIDE", 1)
 
     pos_id = str(art.get("ART_ID", ""))
-    
-    # Resolve selling price (check EST_TARIF_VENTE first, then fallback to ART_PVTE)
+
+    # Resolve selling price (EST_TARIF_VENTE first, fallback to ART_PVTE)
     price = art.get("ART_PVTE")
     try:
         pos_id_int = int(float(pos_id))
@@ -151,33 +173,7 @@ def get_articles(updated_since: datetime | None = None) -> dict:
     tmp_dir = safe_copy_tables(REQUIRED_TABLES)
     try:
         rows = read_table(os.path.join(tmp_dir, "ARTICLES.DB"))
-
-        # Build category map from CLASSIFICATION
-        categories_map = {}
-        cls_path = os.path.join(tmp_dir, "CLASSIFICATION.DB")
-        if os.path.isfile(cls_path):
-            try:
-                cls_rows = read_table(cls_path)
-                categories_map = _build_category_map(cls_rows)
-            except Exception as e:
-                logger.warning("Could not read CLASSIFICATION: %s", e)
-
-        # Build price map from EST_TARIF_VENTE (if exists)
-        from app.config import settings
-        prices_map = {}
-        tarif_db_path = os.path.join(settings.saveurs_path, "EST_TARIF_VENTE.DB")
-        if os.path.isfile(tarif_db_path):
-            tmp_tarif = safe_copy_tables(["EST_TARIF_VENTE"])
-            t_path = os.path.join(tmp_tarif, "EST_TARIF_VENTE.DB")
-            if os.path.isfile(t_path):
-                try:
-                    tarif_rows = read_table(t_path)
-                    prices_map = _build_price_map(tarif_rows)
-                except Exception as e:
-                    logger.warning("Could not read EST_TARIF_VENTE: %s", e)
-            if tmp_tarif != settings.saveurs_path:
-                cleanup_temp(tmp_tarif)
-
+        categories_map, prices_map = _load_reference_data(tmp_dir)
         mod_col = _find_col_name(rows, _MODIFIED_PREFIX)
 
         articles = []
@@ -203,33 +199,7 @@ def get_article_by_id(article_id: int) -> dict | None:
     tmp_dir = safe_copy_tables(REQUIRED_TABLES)
     try:
         rows = read_table(os.path.join(tmp_dir, "ARTICLES.DB"))
-
-        # Build category map
-        categories_map = {}
-        cls_path = os.path.join(tmp_dir, "CLASSIFICATION.DB")
-        if os.path.isfile(cls_path):
-            try:
-                cls_rows = read_table(cls_path)
-                categories_map = _build_category_map(cls_rows)
-            except Exception as e:
-                logger.warning("Could not read CLASSIFICATION: %s", e)
-
-        # Build price map from EST_TARIF_VENTE (if exists)
-        from app.config import settings
-        prices_map = {}
-        tarif_db_path = os.path.join(settings.saveurs_path, "EST_TARIF_VENTE.DB")
-        if os.path.isfile(tarif_db_path):
-            tmp_tarif = safe_copy_tables(["EST_TARIF_VENTE"])
-            t_path = os.path.join(tmp_tarif, "EST_TARIF_VENTE.DB")
-            if os.path.isfile(t_path):
-                try:
-                    tarif_rows = read_table(t_path)
-                    prices_map = _build_price_map(tarif_rows)
-                except Exception as e:
-                    logger.warning("Could not read EST_TARIF_VENTE: %s", e)
-            if tmp_tarif != settings.saveurs_path:
-                cleanup_temp(tmp_tarif)
-
+        categories_map, prices_map = _load_reference_data(tmp_dir)
         mod_col = _find_col_name(rows, _MODIFIED_PREFIX)
 
         for art in rows:
