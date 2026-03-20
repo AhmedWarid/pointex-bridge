@@ -81,7 +81,39 @@ def _resolve_category(art: dict, categories_map: dict[int, str]) -> str | None:
         return None
 
 
-def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, str]) -> dict:
+def _build_price_map(tarif_rows: list[dict]) -> dict[int, float]:
+    """Build ART_ID -> selling price mapping from EST_TARIF_VENTE table."""
+    prices = {}
+    for row in tarif_rows:
+        art_id_raw = row.get("ART_ID")
+        if art_id_raw is None:
+            continue
+        try:
+            art_id = int(float(art_id_raw))
+        except (ValueError, TypeError):
+            continue
+
+        trf_id = row.get("TRF_ID", 1)
+        try:
+            trf_id = int(float(trf_id)) if trf_id is not None else 1
+        except (ValueError, TypeError):
+            trf_id = 1
+
+        price = row.get("ART_PRIX_VENTE")
+        if price is not None:
+            try:
+                price = float(price)
+                # Prefer TRF_ID 1, or just set if not set
+                if art_id not in prices or trf_id == 1:
+                    prices[art_id] = price
+            except (ValueError, TypeError):
+                continue
+
+    logger.info("EST_TARIF_VENTE: %d prices loaded", len(prices))
+    return prices
+
+
+def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, str], prices_map: dict[int, float]) -> dict:
     """Convert a raw Paradox article row to the API response shape."""
     mod_date = art.get(mod_col) if mod_col else None
     if mod_date is not None:
@@ -90,12 +122,23 @@ def _article_to_dict(art: dict, mod_col: str | None, categories_map: dict[int, s
     cache = art.get("ART_CACHE", 0) or 0
     valide = art.get("ART_VALIDE", 1)
 
+    pos_id = str(art.get("ART_ID", ""))
+    
+    # Resolve selling price (check EST_TARIF_VENTE first, then fallback to ART_PVTE)
+    price = art.get("ART_PVTE")
+    try:
+        pos_id_int = int(float(pos_id))
+        if pos_id_int in prices_map:
+            price = prices_map[pos_id_int]
+    except (ValueError, TypeError):
+        pass
+
     return {
-        "posArticleId": str(art.get("ART_ID", "")),
+        "posArticleId": pos_id,
         "barcode": art.get("ART_BARCODE") or None,
         "name": art.get("ART_ARTICLE", ""),
         "category": _resolve_category(art, categories_map),
-        "sellingPrice": art.get("ART_PVTE"),
+        "sellingPrice": price,
         "costPrice": art.get("ART_DEF_PMPA"),
         "unit": "piece",
         "isActive": cache == 0 and valide != 0,
@@ -119,6 +162,22 @@ def get_articles(updated_since: datetime | None = None) -> dict:
             except Exception as e:
                 logger.warning("Could not read CLASSIFICATION: %s", e)
 
+        # Build price map from EST_TARIF_VENTE (if exists)
+        from app.config import settings
+        prices_map = {}
+        tarif_db_path = os.path.join(settings.saveurs_path, "EST_TARIF_VENTE.DB")
+        if os.path.isfile(tarif_db_path):
+            tmp_tarif = safe_copy_tables(["EST_TARIF_VENTE"])
+            t_path = os.path.join(tmp_tarif, "EST_TARIF_VENTE.DB")
+            if os.path.isfile(t_path):
+                try:
+                    tarif_rows = read_table(t_path)
+                    prices_map = _build_price_map(tarif_rows)
+                except Exception as e:
+                    logger.warning("Could not read EST_TARIF_VENTE: %s", e)
+            if tmp_tarif != settings.saveurs_path:
+                cleanup_temp(tmp_tarif)
+
         mod_col = _find_col_name(rows, _MODIFIED_PREFIX)
 
         articles = []
@@ -131,7 +190,7 @@ def get_articles(updated_since: datetime | None = None) -> dict:
                     if mod_date <= updated_since:
                         continue
 
-            articles.append(_article_to_dict(art, mod_col, categories_map))
+            articles.append(_article_to_dict(art, mod_col, categories_map, prices_map))
 
         return {"articles": articles, "totalCount": len(articles)}
 
@@ -155,11 +214,27 @@ def get_article_by_id(article_id: int) -> dict | None:
             except Exception as e:
                 logger.warning("Could not read CLASSIFICATION: %s", e)
 
+        # Build price map from EST_TARIF_VENTE (if exists)
+        from app.config import settings
+        prices_map = {}
+        tarif_db_path = os.path.join(settings.saveurs_path, "EST_TARIF_VENTE.DB")
+        if os.path.isfile(tarif_db_path):
+            tmp_tarif = safe_copy_tables(["EST_TARIF_VENTE"])
+            t_path = os.path.join(tmp_tarif, "EST_TARIF_VENTE.DB")
+            if os.path.isfile(t_path):
+                try:
+                    tarif_rows = read_table(t_path)
+                    prices_map = _build_price_map(tarif_rows)
+                except Exception as e:
+                    logger.warning("Could not read EST_TARIF_VENTE: %s", e)
+            if tmp_tarif != settings.saveurs_path:
+                cleanup_temp(tmp_tarif)
+
         mod_col = _find_col_name(rows, _MODIFIED_PREFIX)
 
         for art in rows:
             if art.get("ART_ID") == article_id:
-                return _article_to_dict(art, mod_col, categories_map)
+                return _article_to_dict(art, mod_col, categories_map, prices_map)
 
         return None
 
