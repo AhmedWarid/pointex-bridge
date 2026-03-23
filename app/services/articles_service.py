@@ -104,9 +104,10 @@ def _build_price_map(tarif_rows: list[dict]) -> dict[int, float]:
         if price is not None:
             try:
                 price = float(price)
-                # Prefer TRF_ID 1, or just set if not set
-                if art_id not in prices or trf_id == 1:
-                    prices[art_id] = price
+                if price > 0:
+                    current_price = prices.get(art_id, 0.0)
+                    if price > current_price:
+                        prices[art_id] = price
             except (ValueError, TypeError):
                 continue
 
