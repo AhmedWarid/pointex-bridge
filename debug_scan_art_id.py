@@ -1,9 +1,12 @@
 import argparse
-import os
+from datetime import date, datetime
 from pathlib import Path
 
 from app.config import settings
 from app.services.paradox_reader import read_table
+
+
+LIVE_TABLES = ("NOTE_DETAIL.DB", "NOTE_DETAIL_RESA.DB")
 
 
 def normalize_id(value):
@@ -24,15 +27,18 @@ def parse_float(value):
         return None
 
 
-def iter_db_files(base_path: Path, recursive: bool):
-    if recursive:
-        yield from sorted(base_path.rglob("*.DB"))
-    else:
-        yield from sorted(base_path.glob("*.DB"))
+def parse_date_only(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
 
 
-def sample_row(row: dict):
-    interesting_keys = [
+def sample_row(row):
+    keys = [
         "ART_ID",
         "VTE_ID",
         "VTE_QUANTITE",
@@ -40,82 +46,118 @@ def sample_row(row: dict):
         "VTE_CACHE",
         "VTE_PRIX_DE_VENTE",
         "VTE_REMISE",
+        "VTE_HEURE",
         "VTE_DATE_DE_LA_PIECE",
         "VTE_DATE_DE_CLOTURE",
         "VTE_CLOTUREE",
-        "VTE_HEURE",
-        "ART_ARTICLE",
-        "ART_CODE",
-        "ART_BARCODE",
     ]
     result = {}
-    for key in interesting_keys:
+    for key in keys:
         if key in row:
             result[key] = row[key]
-    if not result:
-        for key, value in row.items():
-            result[key] = value
-            if len(result) >= 8:
-                break
     return result
 
 
-def scan_table(table_path: Path, article_id: int, sample_limit: int):
-    try:
-        rows = read_table(str(table_path))
-    except Exception as exc:
-        return {"table": str(table_path), "error": str(exc)}
+def build_receipt_lookup(entete_rows):
+    lookup = {}
+    for row in entete_rows:
+        vte_id = normalize_id(row.get("VTE_ID"))
+        if vte_id is None:
+            continue
+        lookup[vte_id] = {
+            "VTE_DATE_DE_LA_PIECE": parse_date_only(row.get("VTE_DATE_DE_LA_PIECE")),
+            "VTE_DATE_DE_CLOTURE": parse_date_only(row.get("VTE_DATE_DE_CLOTURE")),
+            "VTE_CLOTUREE": row.get("VTE_CLOTUREE"),
+            "VTE_CACHE": row.get("VTE_CACHE"),
+        }
+    return lookup
 
+
+def load_note_entete(base_path: Path):
+    entete_path = base_path / "NOTE_ENTETE.DB"
+    if not entete_path.exists():
+        return {}
+    return build_receipt_lookup(read_table(str(entete_path)))
+
+
+def table_matches_for_day(table_path: Path, article_id: int, target_day: date, receipt_lookup: dict):
+    rows = read_table(str(table_path))
     matches = []
-    qty_sum = 0.0
-    qty_rows = 0
-    vte_ids = set()
 
     for row in rows:
         if normalize_id(row.get("ART_ID")) != article_id:
             continue
-        matches.append(row)
-        qty = parse_float(row.get("VTE_QUANTITE"))
-        if qty is not None:
-            qty_sum += qty
-            qty_rows += 1
+
         vte_id = normalize_id(row.get("VTE_ID"))
-        if vte_id is not None:
-            vte_ids.add(vte_id)
+        parent = receipt_lookup.get(vte_id, {})
+        piece_day = parse_date_only(row.get("VTE_DATE_DE_LA_PIECE")) or parent.get("VTE_DATE_DE_LA_PIECE")
+        cloture_day = parse_date_only(row.get("VTE_DATE_DE_CLOTURE")) or parent.get("VTE_DATE_DE_CLOTURE")
 
-    if not matches:
-        return None
+        if piece_day != target_day and cloture_day != target_day:
+            continue
 
-    return {
-        "table": str(table_path),
-        "match_rows": len(matches),
-        "qty_sum": qty_sum,
-        "qty_rows": qty_rows,
-        "unique_vte_ids": len(vte_ids),
-        "samples": [sample_row(row) for row in matches[:sample_limit]],
+        qty = parse_float(row.get("VTE_QUANTITE")) or 0.0
+        payload = sample_row(row)
+        if parent:
+            payload["PARENT_VTE_DATE_DE_LA_PIECE"] = parent.get("VTE_DATE_DE_LA_PIECE")
+            payload["PARENT_VTE_DATE_DE_CLOTURE"] = parent.get("VTE_DATE_DE_CLOTURE")
+            payload["PARENT_VTE_CLOTUREE"] = parent.get("VTE_CLOTUREE")
+            payload["PARENT_VTE_CACHE"] = parent.get("VTE_CACHE")
+        payload["_SORT_HEURE"] = row.get("VTE_HEURE")
+        payload["_QTY"] = qty
+        matches.append(payload)
+
+    matches.sort(key=lambda row: (str(row.get("_SORT_HEURE") or ""), normalize_id(row.get("VTE_ID")) or 0))
+    return matches
+
+
+def summarize_rows(rows):
+    qty_sum = sum(float(row.get("_QTY") or 0.0) for row in rows)
+    unique_vte_ids = {
+        normalize_id(row.get("VTE_ID"))
+        for row in rows
+        if normalize_id(row.get("VTE_ID")) is not None
     }
+    return {
+        "rows": len(rows),
+        "qty_sum": qty_sum,
+        "unique_vte_ids": len(unique_vte_ids),
+    }
+
+
+def print_table_result(table_name: str, rows):
+    summary = summarize_rows(rows)
+    print(table_name)
+    print(
+        f"  rows={summary['rows']} qty_sum={summary['qty_sum']:.3f} "
+        f"unique_vte_ids={summary['unique_vte_ids']}"
+    )
+    if not rows:
+        print("  no current-day rows")
+        print()
+        return
+    for row in rows:
+        row = dict(row)
+        row.pop("_SORT_HEURE", None)
+        row.pop("_QTY", None)
+        print(f"  row={row}")
+    print()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Brute-force scan Paradox tables for rows matching a specific ART_ID."
+        description="Compare current-day live rows for one ART_ID in NOTE_DETAIL and NOTE_DETAIL_RESA."
     )
-    parser.add_argument("article_id", type=int, help="Target ART_ID to search for, e.g. 295")
+    parser.add_argument("article_id", type=int, help="Target ART_ID, e.g. 295")
     parser.add_argument(
         "--path",
         default=settings.saveurs_path,
-        help="Base SAVEURS path to scan. Defaults to configured SAVEURS_PATH.",
+        help="Base SAVEURS path. Defaults to configured SAVEURS_PATH.",
     )
     parser.add_argument(
-        "--top-level-only",
-        action="store_true",
-        help="Only scan .DB files directly under SAVEURS. Default scans all subfolders recursively.",
-    )
-    parser.add_argument(
-        "--sample-limit",
-        type=int,
-        default=5,
-        help="How many matching rows to print per table.",
+        "--date",
+        default=date.today().isoformat(),
+        help="Business day in YYYY-MM-DD. Defaults to today.",
     )
     args = parser.parse_args()
 
@@ -123,52 +165,27 @@ def main():
     if not base_path.exists():
         raise SystemExit(f"Path does not exist: {base_path}")
 
-    print(f"Scanning for ART_ID={args.article_id}")
+    try:
+        target_day = date.fromisoformat(args.date)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --date value: {args.date}") from exc
+
+    print(f"ART_ID={args.article_id}")
     print(f"Base path: {base_path}")
-    print(f"Recursive: {not args.top_level_only}")
+    print(f"Business day: {target_day.isoformat()}")
     print()
 
-    results = []
-    errors = []
+    receipt_lookup = load_note_entete(base_path)
 
-    for table_path in iter_db_files(base_path, not args.top_level_only):
-        result = scan_table(table_path, args.article_id, args.sample_limit)
-        if not result:
-            continue
-        if "error" in result:
-            errors.append(result)
-            continue
-        results.append(result)
-
-    results.sort(
-        key=lambda item: (
-            item["qty_sum"],
-            item["match_rows"],
-            item["unique_vte_ids"],
-            item["table"],
-        ),
-        reverse=True,
-    )
-
-    if not results:
-        print("No matching rows found.")
-    else:
-        print(f"Tables with matches: {len(results)}")
-        print()
-        for item in results:
-            print(item["table"])
-            print(
-                f"  rows={item['match_rows']} qty_sum={item['qty_sum']:.3f} "
-                f"qty_rows={item['qty_rows']} unique_vte_ids={item['unique_vte_ids']}"
-            )
-            for sample in item["samples"]:
-                print(f"  sample={sample}")
+    for table_name in LIVE_TABLES:
+        table_path = base_path / table_name
+        if not table_path.exists():
+            print(table_name)
+            print("  missing")
             print()
-
-    if errors:
-        print("Tables with read errors:")
-        for item in errors:
-            print(f"  {item['table']}: {item['error']}")
+            continue
+        rows = table_matches_for_day(table_path, args.article_id, target_day, receipt_lookup)
+        print_table_result(table_name, rows)
 
 
 if __name__ == "__main__":
