@@ -21,6 +21,38 @@ _DATE_COL_PREFIX = "VTE_DATE_DE_LA"
 _SALES_SAMPLE_LIMIT = 8
 
 
+def _get_debug_watch_art_ids() -> set[int]:
+    """
+    Return watched ART_IDs for deep sales debugging.
+    Uses BRIDGE_DEBUG_ART_IDS="295,123,456". Defaults to 295 for the current investigation.
+    """
+    raw = os.getenv("BRIDGE_DEBUG_ART_IDS", "295")
+    result = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            result.add(int(token))
+        except ValueError:
+            logger.warning("Ignoring invalid BRIDGE_DEBUG_ART_IDS token: %r", token)
+    return result
+
+
+def _debug_line_payload(line: dict) -> dict:
+    return {
+        "vte_id": _normalize_id(line.get("VTE_ID")),
+        "art_id": _normalize_id(line.get("ART_ID")),
+        "qty": line.get("VTE_QUANTITE"),
+        "type_ligne": line.get("VTE_TYPE_LIGNE"),
+        "cache": line.get("VTE_CACHE"),
+        "price": line.get("VTE_PRIX_DE_VENTE") if line.get("VTE_PRIX_DE_VENTE") is not None else _find_col(line, "VTE_PRIX_DE_V"),
+        "remise": line.get("VTE_REMISE"),
+        "heure": line.get("VTE_HEURE"),
+        "ordre": line.get("VTE_ORDRE"),
+    }
+
+
 def _find_col(row: dict, prefix: str):
     """Find the first column value whose name starts with prefix."""
     for key in row:
@@ -149,6 +181,17 @@ def _aggregate_details(
     agg = defaultdict(lambda: {"qty": 0.0, "revenue": 0.0, "price": 0.0, "txns": set()})
     skip_stats = _empty_skip_stats()
     skip_stats["lines_total"] = len(details)
+    debug_watch_ids = _get_debug_watch_art_ids()
+    debug_summary = defaultdict(lambda: {
+        "seen": 0,
+        "counted": 0,
+        "skip_no_art_id": 0,
+        "skip_bad_art_id": 0,
+        "skip_art_id_zero": 0,
+        "skip_type_ligne": 0,
+        "skip_cache": 0,
+        "qty_counted": 0.0,
+    })
 
     for line in details:
         art_id_raw = line.get("ART_ID")
@@ -163,12 +206,21 @@ def _aggregate_details(
         if art_id == 0:
             skip_stats["skip_art_id_zero"] += 1
             continue
+        if art_id in debug_watch_ids:
+            debug_summary[art_id]["seen"] += 1
 
         lt = line.get("VTE_TYPE_LIGNE")
         if lt is not None:
             try:
                 if int(float(lt)) != 0:
                     skip_stats["skip_type_ligne"] += 1
+                    if art_id in debug_watch_ids:
+                        debug_summary[art_id]["skip_type_ligne"] += 1
+                        logger.info(
+                            "Sales debug watched article skipped by VTE_TYPE_LIGNE: context=%s payload=%s",
+                            context_label,
+                            _debug_line_payload(line),
+                        )
                     continue
             except (ValueError, TypeError):
                 pass
@@ -178,6 +230,13 @@ def _aggregate_details(
             try:
                 if int(float(vc)) != 0:
                     skip_stats["skip_cache"] += 1
+                    if art_id in debug_watch_ids:
+                        debug_summary[art_id]["skip_cache"] += 1
+                        logger.info(
+                            "Sales debug watched article skipped by VTE_CACHE: context=%s payload=%s",
+                            context_label,
+                            _debug_line_payload(line),
+                        )
                     continue
             except (ValueError, TypeError):
                 pass
@@ -219,6 +278,15 @@ def _aggregate_details(
             agg[art_id]["txns"].add(vid)
 
         skip_stats["lines_counted"] += 1
+        if art_id in debug_watch_ids:
+            debug_summary[art_id]["counted"] += 1
+            debug_summary[art_id]["qty_counted"] += qty
+            logger.info(
+                "Sales debug watched article counted: context=%s payload=%s effective_price=%.4f",
+                context_label,
+                _debug_line_payload(line),
+                effective_price,
+            )
 
     sales = []
     total_revenue = 0.0
@@ -255,6 +323,14 @@ def _aggregate_details(
         context_label,
         [_summarize_sale_item(s) for s in sales[:_SALES_SAMPLE_LIMIT]],
     )
+    for art_id, summary in debug_summary.items():
+        logger.info(
+            "Sales debug watched article summary: context=%s art_id=%s article_name=%s summary=%s",
+            context_label,
+            art_id,
+            articles_map.get(art_id, {}).get("ART_ARTICLE"),
+            summary,
+        )
 
     return {
         "sales": sales,
@@ -269,6 +345,15 @@ def _read_archive_details(vd_path: str) -> list[dict]:
     try:
         rows = read_table(vd_path)
         logger.info("Archive read: path=%s detail_lines=%d", vd_path, len(rows))
+        debug_watch_ids = _get_debug_watch_art_ids()
+        for row in rows:
+            art_id = _normalize_id(row.get("ART_ID"))
+            if art_id in debug_watch_ids:
+                logger.info(
+                    "Sales debug watched article archive row: path=%s payload=%s",
+                    vd_path,
+                    _debug_line_payload(row),
+                )
         return rows
     except Exception as e:
         logger.warning("Error reading archive %s: %s", vd_path, e)
@@ -289,6 +374,7 @@ def _read_live_details(from_dt: datetime, to_dt: datetime, tmp_dir: str) -> list
 
     entetes = read_table(ne_path)
     details = read_table(nd_path)
+    debug_watch_ids = _get_debug_watch_art_ids()
 
     date_col = _find_col_name(entetes, _DATE_COL_PREFIX)
     if not date_col:
@@ -296,25 +382,48 @@ def _read_live_details(from_dt: datetime, to_dt: datetime, tmp_dir: str) -> list
 
     valid_vte_ids = set()
     skipped_receipts_cache = 0
+    entete_debug = {}
     for row in entetes:
+        vte_id = _normalize_id(row.get("VTE_ID"))
+        rejected_by_cache = False
         vc = row.get("VTE_CACHE")
         if vc is not None:
             try:
                 if int(float(vc)) != 0:
                     skipped_receipts_cache += 1
-                    continue
+                    rejected_by_cache = True
             except (ValueError, TypeError):
                 pass
-
         rec_date = row.get(date_col) if date_col else None
-        if is_in_period(rec_date, from_dt, to_dt):
-            vte_id = _normalize_id(row.get("VTE_ID"))
+        in_period = is_in_period(rec_date, from_dt, to_dt)
+        if vte_id is not None:
+            entete_debug[vte_id] = {
+                "vte_cache": row.get("VTE_CACHE"),
+                "vte_cloturee": row.get("VTE_CLOTUREE"),
+                "vte_date_piece": row.get(date_col) if date_col else None,
+                "rejected_by_cache": rejected_by_cache,
+                "in_period": in_period,
+            }
+        if rejected_by_cache:
+            continue
+
+        if in_period:
             if vte_id is not None:
                 valid_vte_ids.add(vte_id)
 
     filtered = []
     for line in details:
         vid = _normalize_id(line.get("VTE_ID"))
+        art_id = _normalize_id(line.get("ART_ID"))
+        if art_id in debug_watch_ids:
+            logger.info(
+                "Sales debug watched article live row: from=%s to=%s included=%s payload=%s parent=%s",
+                from_dt.isoformat(),
+                to_dt.isoformat(),
+                vid in valid_vte_ids,
+                _debug_line_payload(line),
+                entete_debug.get(vid),
+            )
         if vid in valid_vte_ids:
             filtered.append(line)
 
