@@ -479,14 +479,23 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
 
             if raznotes_dir:
                 archive_details = _read_raznotes_details(raznotes_dir)
-                all_details.extend(archive_details)
-                sources.add("archive")
-                logger.info(
-                    "Sales service using RAZNotes archive for date=%s path=%s detail_lines=%d",
-                    current.isoformat(),
-                    raznotes_dir,
-                    len(archive_details),
-                )
+                if archive_details:
+                    all_details.extend(archive_details)
+                    sources.add("archive")
+                    logger.info(
+                        "Sales service using RAZNotes archive for date=%s path=%s detail_lines=%d",
+                        current.isoformat(),
+                        raznotes_dir,
+                        len(archive_details),
+                    )
+                else:
+                    # RAZNotes folder exists but is empty (e.g. Z-closing reset)
+                    # Fall back to live data from root
+                    dates_needing_live.append(current)
+                    logger.info(
+                        "Sales service RAZNotes archive empty for date=%s, falling back to live tables",
+                        current.isoformat(),
+                    )
             else:
                 dates_needing_live.append(current)
                 logger.info(
