@@ -11,7 +11,7 @@ import os
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from app.services.file_manager import cleanup_temp, get_archive_paths, safe_copy_tables
+from app.services.file_manager import cleanup_temp, get_raznotes_path, safe_copy_tables
 from app.services.paradox_reader import read_table
 from app.utils.date_utils import is_in_period, localize_naive
 
@@ -340,23 +340,27 @@ def _aggregate_details(
     }
 
 
-def _read_archive_details(vd_path: str) -> list[dict]:
-    """Read detail lines from a daily archive VD file."""
+def _read_raznotes_details(raznotes_dir: str) -> list[dict]:
+    """Read detail lines from a RAZNotes archive subfolder (NOTE_DETAIL.DB)."""
+    nd_path = os.path.join(raznotes_dir, "NOTE_DETAIL.DB")
+    if not os.path.isfile(nd_path):
+        logger.warning("NOTE_DETAIL.DB not found in RAZNotes dir: %s", raznotes_dir)
+        return []
     try:
-        rows = read_table(vd_path)
-        logger.info("Archive read: path=%s detail_lines=%d", vd_path, len(rows))
+        rows = read_table(nd_path)
+        logger.info("RAZNotes archive read: path=%s detail_lines=%d", raznotes_dir, len(rows))
         debug_watch_ids = _get_debug_watch_art_ids()
         for row in rows:
             art_id = _normalize_id(row.get("ART_ID"))
             if art_id in debug_watch_ids:
                 logger.info(
                     "Sales debug watched article archive row: path=%s payload=%s",
-                    vd_path,
+                    raznotes_dir,
                     _debug_line_payload(row),
                 )
         return rows
     except Exception as e:
-        logger.warning("Error reading archive %s: %s", vd_path, e)
+        logger.warning("Error reading RAZNotes archive %s: %s", raznotes_dir, e)
         return []
 
 
@@ -465,24 +469,22 @@ def get_sales(from_dt: datetime, to_dt: datetime) -> dict:
 
         dates_needing_live = []
         while current <= end:
-            vd_path, ve_path = get_archive_paths(current)
+            raznotes_dir = get_raznotes_path(current)
             logger.info(
-                "Sales service checking date=%s archive_vd=%s archive_ve=%s has_vd=%s has_ve=%s",
+                "Sales service checking date=%s raznotes_dir=%s has_archive=%s",
                 current.isoformat(),
-                vd_path,
-                ve_path,
-                bool(vd_path),
-                bool(ve_path),
+                raznotes_dir,
+                bool(raznotes_dir),
             )
 
-            if vd_path:
-                archive_details = _read_archive_details(vd_path)
+            if raznotes_dir:
+                archive_details = _read_raznotes_details(raznotes_dir)
                 all_details.extend(archive_details)
                 sources.add("archive")
                 logger.info(
-                    "Sales service using archive for date=%s path=%s detail_lines=%d",
+                    "Sales service using RAZNotes archive for date=%s path=%s detail_lines=%d",
                     current.isoformat(),
-                    vd_path,
+                    raznotes_dir,
                     len(archive_details),
                 )
             else:

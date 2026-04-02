@@ -2,8 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    saveurs_path: str = r"\\CAISSE-PC\firstclass\SAVEURS"
-    fc2_dir: str = r"\\CAISSE-PC\firstclass"  # Directory containing .FC2 backup files
+    saveurs_path: str = r"\\CAISSE-PC\pointex21\LATELIER"
     api_port: int = 8470
     api_host: str = "0.0.0.0"
     api_key: str = "change-me-to-a-secret-key"

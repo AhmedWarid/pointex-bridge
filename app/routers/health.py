@@ -35,7 +35,7 @@ async def health_check():
 
     return {
         "status": status,
-        "saveurs_path_accessible": path_accessible,
+        "pos_path_accessible": path_accessible,
         "last_articles_modified": last_modified,
         "tables_found": tables_found,
     }

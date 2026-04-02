@@ -107,22 +107,46 @@ def safe_copy_tables(table_names: list[str]) -> str:
     return tmp_dir
 
 
-def get_archive_paths(target_date: date) -> tuple[str | None, str | None]:
+def get_raznotes_path(target_date: date) -> str | None:
     """
-    Return (vd_path, ve_path) for a date's daily archive files.
-    VD = detail lines, VE = receipt headers.
-    Returns None for each file that doesn't exist.
-    Archive files are static (written after Z closing) so no safe_copy needed.
+    Return the path to the latest RAZNotes subfolder for a given date.
+
+    RAZNotes subfolders are named like YYYYMMDD-HHMMSS (e.g. 20260402-002136).
+    There may be multiple closings per day; we pick the latest one.
+    Each subfolder contains NOTE_ENTETE.DB, NOTE_DETAIL.DB, etc.
+
+    Returns None if no matching folder is found.
     """
-    year_folder = f"AN{target_date.year}"
-    vd_name = f"VD{target_date.strftime('%m%d%y')}.DB"
-    ve_name = f"VE{target_date.strftime('%m%d%y')}.DB"
-    vd_path = os.path.join(settings.saveurs_path, year_folder, vd_name)
-    ve_path = os.path.join(settings.saveurs_path, year_folder, ve_name)
-    return (
-        vd_path if os.path.isfile(vd_path) else None,
-        ve_path if os.path.isfile(ve_path) else None,
+    raznotes_dir = os.path.join(settings.saveurs_path, "RAZNotes")
+    if not os.path.isdir(raznotes_dir):
+        logger.warning("RAZNotes directory not found: %s", raznotes_dir)
+        return None
+
+    date_prefix = target_date.strftime("%Y%m%d")
+    matching = []
+
+    try:
+        for entry in os.listdir(raznotes_dir):
+            if entry.startswith(date_prefix):
+                full_path = os.path.join(raznotes_dir, entry)
+                if os.path.isdir(full_path):
+                    matching.append(full_path)
+    except Exception as e:
+        logger.warning("Cannot list RAZNotes directory %s: %s", raznotes_dir, e)
+        return None
+
+    if not matching:
+        logger.info("No RAZNotes folder found for date %s", target_date.isoformat())
+        return None
+
+    # Sort to get the latest closing (highest timestamp suffix)
+    matching.sort()
+    chosen = matching[-1]
+    logger.info(
+        "RAZNotes folder for %s: %s (out of %d matches)",
+        target_date.isoformat(), chosen, len(matching),
     )
+    return chosen
 
 
 def cleanup_temp(tmp_dir: str):
